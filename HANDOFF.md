@@ -1,0 +1,209 @@
+# 引き継ぎ資料 — 漢字クイズ Androidアプリ（KanjiQuiz）
+
+このドキュメントは、開発を引き継ぐAIアシスタント向けの説明です。
+プロジェクトの目的・構成・設計判断・現状・残タスク・注意点を1ファイルにまとめています。
+**まずこれを最初から最後まで読んでください。** ソースは `app/src/main/java/com/example/kanjiquiz/MainActivity.kt` 1ファイルに全ロジックが入っています。
+
+---
+
+## 0. 依頼者について（重要）
+
+- 日本語話者。**やり取りはすべて日本語で**行うこと。
+- **Android開発は初心者。** ビルドは手元ではなく GitHub Actions に任せる運用（後述）。専門用語は最小限に、手順は具体的に。
+- 作業スタイル：**実用的で、すぐ使える成果物**を好む。長い説明・抽象論・過剰な前置きを嫌う。論理の矛盾には鋭く突っ込んでくる。回答は簡潔に。
+- 用途：本人が自作した AnkiDroid デッキ（難読漢字、漢字でGO！Lv.4 など。ピッチアクセント欄つきのものもある）を、手軽に・楽しく復習するためのクイズゲーム。
+
+---
+
+## 1. アプリの目的とコンセプト
+
+AnkiDroid に入っている**既存のデッキを読み取って**、漢字でGO風のクイズゲームを出題するアプリ。
+
+- **読み取り専用。** AnkiDroid の復習スケジューラには一切書き込まない。成績・履歴・苦手判定はすべてこのアプリ側（SharedPreferences）に独立して保存する。これは明確な設計方針であり、勝手に変えないこと。
+- `.apkg` エクスポートは不要。AnkiDroid 公式 ContentProvider API で実データを直接読む。
+
+---
+
+## 2. 技術スタックとビルド構成（勝手にバージョンを上げない）
+
+| 項目 | 値 |
+|---|---|
+| 言語 / UI | Kotlin + Jetpack Compose |
+| AGP | 8.5.2 |
+| Kotlin / compose-plugin | 2.0.20 |
+| compileSdk / targetSdk | 34 |
+| minSdk | 26 |
+| JDK | 17 |
+| Compose BOM | 2024.09.00 |
+| Gradle (Actions内) | 8.9 |
+
+依存は `androidx.core:core-ktx:1.13.1`, `androidx.activity:activity-compose:1.9.2`, `compose ui / foundation / material3` のみ。
+**追加ライブラリなしを維持すること。** グラフはCompose標準の `Canvas`、保存は `SharedPreferences` + `org.json`、すべて標準機能で実装済み。新機能を足すときも、可能な限り依存を増やさない方針。
+
+ファイル構成（このzipの中身）：
+```
+settings.gradle.kts
+gradle.properties
+build.gradle.kts                (root, プラグインのバージョン宣言)
+app/build.gradle.kts            (依存・SDK設定)
+app/src/main/AndroidManifest.xml
+app/src/main/java/com/example/kanjiquiz/MainActivity.kt   ← 全ロジック
+.github/workflows/build.yml     (Actionsビルド定義)
+```
+
+---
+
+## 3. ビルド／配布パイプライン（この環境の制約）
+
+**開発環境には Android コンパイラが無い。** そのため：
+
+1. 依頼者は本プロジェクトを GitHub リポジトリに push する（Termux の git 経由で設定済み）。
+2. push すると `.github/workflows/build.yml` が走り、`gradle assembleDebug` で **debug APK** をビルド。
+3. 成果物は Actions の Artifacts に `KanjiQuiz-apk` という名前で上がる（パス `app/build/outputs/apk/debug/app-debug.apk`）。
+4. 依頼者はそれをダウンロードして端末にインストール。
+
+- リポジトリ: `https://github.com/ujebbari-commits/KanjiQuiz.git`（GitHubユーザー名 `ujebbari-commits`）
+- 認証は Personal Access Token（classic, スコープ `repo`）をパスワード代わりに使用。
+- **コードを直せても、この環境で APK は作れない。** 「ビルドは Actions で確認して」と正直に伝えること。ビルドが失敗（赤❌）したら、依頼者に**失敗ログの赤い行を貼ってもらって**デバッグする。
+
+差し替え手順（コードだけ変える場合、依頼者に渡す用）：
+```
+cd <プロジェクトのフォルダ>
+cp <新しいMainActivity.kt> app/src/main/java/com/example/kanjiquiz/MainActivity.kt
+git add -A && git commit -m "update" && git push
+```
+
+---
+
+## 4. AnkiDroid 連携の要点（ハマりどころ）
+
+- 権限: `com.ichi2.anki.permission.READ_WRITE_DATABASE`（読み取りにのみ使用）。起動時にランタイム権限をリクエストする実装済み。
+- Manifest に `<queries><package android:name="com.ichi2.anki"/></queries>` が必要（Android 11+ で AnkiDroid を可視にするため）。設定済み。
+- デッキ一覧: `content://com.ichi2.anki.flashcards/decks`（列 `deck_id`, `deck_name`）
+- ノート: `content://com.ichi2.anki.flashcards/notes`（selection `deck:"デッキ名"`、列 `flds`（`\u001f` = `\u001f` で区切られる複数フィールド）と `_id`）
+- **利用者側の前提**: AnkiDroid を一度起動 ＋ 設定→高度な設定→「AnkiDroid API」を有効化していないと接続できない。エラー画面でこの旨を案内する実装済み。
+- `_id`（ノートID）は「苦手カード優先」機能でカードを一意に識別するキーとして使用。
+
+### テキスト整形の仕様（`MainActivity.kt` 内）
+- `cleanText`: `[sound:...]` 除去、`<br>`/`</div>` 等を改行に、HTMLタグ除去、実体参照の復元、改行正規化。
+- `normalizeKana`: カタカナ→ひらがな統一。判定時はこれで正規化し、**ピッチアクセントの矢印や記号は無視**（難読漢字デッキのピッチ欄をそのまま使えるようにするため）。
+- 複数読みは区切り文字（読点・カンマ・中黒・スラッシュ・空白・改行）で分割し、いずれか一致で正解。
+
+---
+
+## 5. 実装済み機能（現状 = 完成状態）
+
+### 基本
+- デッキ選択 → フィールド選択（問題側／こたえ側を**複数選択で連結可能**、チェックボックス）→ プレイ。
+- **クイズ（入力式）**: 漢字を見て読みをひらがな入力。カタカナ可、複数読み可。
+- **めくりモード**: 表＋裏を同時表示するスライドショー（PPT風の自動送り、タップで一時停止、前／次）。
+- 設定（`SharedPreferences` 永続化）: 出題数、制限時間（無制限含む）、自動送りON/OFF＋表示秒数、めくり秒数。
+- ゲーム履歴（最大50件、`org.json` で保存）。
+- 改行保持（`<br>`,`</div>` → 実改行）。
+
+### 今回追加した7機能（すべて実装済み・依頼者はこれでリビルド予定）
+1. **苦手カード優先出題**: ノート `_id` ごとに `[seen, wrong]` を記録（`cardStats`）。出題順は重み付き抽選（Efraimidis-Spirakis: `u^(1/weight)` を降順、`weight = 1 + wrong`）。ラウンド終了時に更新: `seen++`、正解なら `wrong=max(0,wrong-1)`、不正解なら `wrong=min(10,wrong+2)`。フィールド画面のスイッチでON/OFF。
+2. **間違えた語だけ即リトライ**: 結果画面の「間違いだけ復習（N問）」ボタンで、ミスした `QuizItem` だけで通常ラウンドを再構成。
+3. **連続日数（ストリーク）**: `streakDate`/`streakCount` を保存。デッキ画面に「🔥 N日連続」表示。プレイ完了時に更新。
+4. **サバイバル / タイムアタック**: `GameMode` enum（NORMAL / SURVIVAL / TIME_ATTACK）。サバイバル＝ライフ3（❤UI、タイムアウトもミス）、タイムアタック＝全体60秒（`TIME_ATTACK_SEC`）カウントダウン・1問ごとのタイマーは無効。
+5. **逆モード**: 読み（こたえ側）を見て、正しい漢字を4択で選ぶ。ダミー選択肢は他カードの問題側から生成。フィールド画面「出題の向き」で切替。
+6. **正答率の推移グラフ**: 履歴画面に Compose Canvas の折れ線（直近20回、0/50/100%グリッド）。
+7. **諦めるボタン＋確認ダイアログ**: プレイ中の「やめる」と Android 戻るボタンの両方で、AlertDialog（「ホームに戻る」「今回の結果は記録されません」／戻る・続ける）を表示。**Android 戻るボタン対応**は各画面に `BackHandler` を実装（QUIZ→確認ダイアログ、他→前の画面へ、DECKSは既定＝アプリ終了）。
+
+
+### 追加実装（2026-07-20）
+
+以下を `MainActivity.kt` だけで追加済み。依存ライブラリ・AGP・Kotlin・SDK・Compose BOMは変更していない。
+
+1. **サバイバル／タイムアタックの循環出題**
+   - サバイバルは3ミスまで継続。
+   - タイムアタックは60秒終了まで継続。
+   - 全カードを使い切ると再シャッフルし、可能な場合は直前と同じ問題を連続させない。
+2. **定着するまで復習**
+   - 結果画面から、間違えた語を全て正解するまで繰り返す。
+   - 間違えた語はキュー末尾へ戻し、正解した語だけ除外する。
+3. **苦手語チャレンジ**
+   - `cardStats` の苦手度が高い最大10語を出題。
+   - 苦手度が0になった語数を結果画面に表示。
+4. **逆モードの選択肢改善**
+   - 問題文字数、漢字数、読みの長さが近い語をダミー候補として優先。
+   - リトライ時も元デッキ全体を選択肢候補に使う。
+5. **デイリーチャレンジ**
+   - 日付・デッキ・選択フィールド・出題方向をキーに固定10問を生成。
+   - 同じ条件の正式履歴は1日1回。再挑戦は可能だが履歴には追加しない。
+6. **タイムアタック演出**
+   - 正解で残り時間+1秒、5コンボごとに追加+2秒。
+   - 残り10秒未満を強調。結果に最大コンボとプレイ時間を表示。
+7. **成績の分離記録**
+   - 履歴にゲーム形式、出題方向、苦手優先、最大コンボ、プレイ時間を保存。
+   - 履歴画面でデッキ／ゲーム形式／出題方向を絞り込み、絞り込み後の正答率グラフを表示。
+   - 旧形式の履歴JSONも通常モードとして読み込める。
+
+### コード構造（`MainActivity.kt`）
+- 画面遷移は `Stage` enum（DECKS / FIELDS / QUIZ / FLASHCARD / RESULT / HISTORY / SETTINGS）を `when` で分岐（`App()` composable）。
+- `Store` クラスが SharedPreferences 全般（設定・履歴・カード成績・ストリーク）を担当。
+- `RoundConfig` data class でラウンドのパラメータ（items, gameMode, reverse, timeLimit, autoAdvance, feedbackDeci）を分離。リトライ系はここを差し替えて再利用。
+- `key(round)` で QuizScreen / FlashcardScreen の状態をラウンドごとにリセット。
+- タイマーは `LaunchedEffect` 内のループ。確認ダイアログ表示中（`showConfirm`）はカウントを止める。二重終了防止に `ended` フラグ。
+
+---
+
+## 6. 検証状況
+
+- Android SDKを使った実ビルドは未確認。最終確認はGitHub Actionsの `gradle assembleDebug` で行う。
+- 実施済みの静的確認:
+  - 文字列・コメントを除外した括弧対応チェック: 問題なし。
+  - 単純カウント: 波括弧 458/458、丸括弧 1134/1134。
+  - import確認: 新規追加は標準ライブラリの `kotlin.math.abs` のみ。
+  - Android／Compose／JSON／Coroutineの簡易スタブを使ったKotlin型チェック: エラーなし。
+- GitHub Actionsが赤になった場合は、失敗ログの最初の赤いエラー行とその前後を確認する。
+
+---
+
+## 7. 想定される次のタスク・改善候補（依頼者がまだ選んでいない分）
+
+過去に提案して未採用のアイデア（依頼者が興味を示せば実装）:
+- ヒントフィールド（語源・部首メモ欄を「ヒント側」として選び、不正解時やヒントボタンで表示）。分解ロジック・語源で覚えるスタイルと相性が良い。
+- ピッチアクセント表示（こたえ表示時に読みのピッチ矢印をそのまま出す）。
+- 効果音・バイブ（正誤フィードバックの手触り向上）。
+- 「おしい判定」（長音・小さい「っ」・濁点だけの違いを別表示。正誤は変えず学習フィードバックのみ）。
+- デッキ別成績、いつも間違える語の抽出などの統計強化。
+
+新機能を足すときは:
+- 依存を増やさない。標準機能で実装。
+- 変更は原則 `MainActivity.kt` 1ファイルに収める（プロジェクト構成を崩さない）。
+- 読み取り専用の原則を守る（Anki のスケジューラに書き込まない）。
+
+---
+
+## 8. 注意点まとめ（引き継ぎAIへ）
+
+1. 日本語で、簡潔に。長い前置き・過剰な説明は避ける。
+2. この環境では APK を作れない。ビルドは GitHub Actions 前提。それを正直に伝える。
+3. バージョン（AGP/Kotlin/SDK/BOM）を勝手に上げない。動いている組み合わせを維持。
+4. 読み取り専用の設計を崩さない。
+5. コードを丸ごと書き直すときは、括弧の対応と import を必ず確認してから渡す。
+6. ビルド失敗時は「赤いログの該当行を貼って」と頼み、そこから直す。
+
+### v1.1 追加実装
+- `versionCode = 2`、`versionName = 1.1`。Actions成果物は `KanjiQuiz-v1.1-apk`、APK名は `KanjiQuiz-v1.1-debug.apk`。
+- ゲーム形式に「3回正解」を追加。選択された各カードはラウンド内で合計3回正解するとキューから外れ、全カード達成で終了する。誤答しても正解回数は減らない。
+- クイズ画面の問題・正解、およびめくり画面の表・裏を `SelectionContainer` で囲み、Androidの文字選択メニューからYomitan等を起動できるようにした。
+
+### v1.2 追加実装
+- `versionCode = 3`、`versionName = 1.2`。Actions成果物は `KanjiQuiz-v1.2-apk`、APK名は `KanjiQuiz-v1.2-debug.apk`。
+- 設定に「1問あたりの最大挑戦回数」を追加。初期値3、設定可能範囲は1〜99。
+- 誤答しても残り挑戦回数があれば正解を表示せず、同じカードを再出題する。通常入力・逆4択の両方に対応。
+- 途中の誤答は `AnswerLog` に追加せず、カード成績・苦手度・履歴の問題数・サバイバル残機には反映しない。最終挑戦で誤答した場合、またはパス・時間切れの場合に1問の不正解として確定する。
+- 再挑戦時は1問タイマーをリセットする。タイムアタックの全体タイマーはリセットしない。途中の誤答でコンボは0に戻る。
+
+
+### v1.3 / Web v0.1.0 追加実装
+- Android版は `versionCode = 4`、`versionName = 1.3`。
+- デッキのフィールド選択画面に「Web版用JSONを保存」を追加。AnkiDroidのデータには書き込まず、読み込んだノートをユーザー指定のJSONファイルへ保存する。
+- `web/` に依存ライブラリなしのFirefox向けPWAを追加。IndexedDBにデッキ、localStorageに設定・履歴・苦手度を保存する。
+- Web版はJSON / CSV / TSV / TXTを読み込む。Android版が出力する `KanjiQuizWebDeck` JSONを直接利用できる。
+- 通常、サバイバル、タイムアタック、3回正解、定着復習、苦手語、デイリー、逆4択、最大挑戦回数、履歴フィルター、グラフ、めくりを移植済み。
+- 問題文・答えはCanvasではなく選択可能なHTMLテキスト。文字選択中は設定によりタイマーを一時停止する。
+- `.github/workflows/pages.yml` で `web/` をGitHub Pagesへ公開する。
+- Web版のNode/jsdomスモークテストで、TSV取込→デッキ保存→通常クイズ→誤答後再挑戦→正解→結果画面まで確認済み。

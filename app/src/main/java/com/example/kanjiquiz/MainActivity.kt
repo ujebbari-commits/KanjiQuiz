@@ -67,6 +67,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -94,7 +95,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.1"
+private const val APP_VERSION = "1.3"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -112,6 +113,7 @@ data class Settings(
     val reverse: Boolean = false,
     val gameMode: GameMode = GameMode.NORMAL,
     val weakPriority: Boolean = true,
+    val maxAttempts: Int = 3,
 )
 
 data class RoundConfig(
@@ -122,6 +124,7 @@ data class RoundConfig(
     val autoAdvance: Boolean,
     val feedbackDeci: Int,
     val weakPriority: Boolean,
+    val maxAttempts: Int,
     val choicePool: List<QuizItem>,
     val dailyKey: String? = null,
 )
@@ -160,6 +163,7 @@ class Store(context: Context) {
         gameMode = runCatching { GameMode.valueOf(sp.getString("gameMode", "NORMAL")!!) }
             .getOrDefault(GameMode.NORMAL),
         weakPriority = sp.getBoolean("weakPriority", true),
+        maxAttempts = sp.getInt("maxAttempts", 3).coerceIn(1, 99),
     )
 
     fun saveSettings(s: Settings) {
@@ -172,6 +176,7 @@ class Store(context: Context) {
             .putBoolean("reverse", s.reverse)
             .putString("gameMode", s.gameMode.name)
             .putBoolean("weakPriority", s.weakPriority)
+            .putInt("maxAttempts", s.maxAttempts.coerceIn(1, 99))
             .apply()
     }
 
@@ -349,6 +354,38 @@ private fun joinFields(flds: List<String>, indices: List<Int>): String =
 private fun acceptedFrom(flds: List<String>, indices: List<Int>): List<String> =
     indices.flatMap { parseAnswers(flds.getOrNull(it) ?: "") }.distinct()
 
+private fun safeFileName(name: String): String =
+    name.replace(Regex("[\\/:*?\"<>|]"), "_").take(80).ifBlank { "deck" }
+
+private fun buildWebDeckJson(
+    deckName: String,
+    notes: List<Pair<Long, List<String>>>,
+): String {
+    val fieldCount = notes.maxOfOrNull { it.second.size } ?: 0
+    val fields = JSONArray().apply {
+        repeat(fieldCount) { index -> put("フィールド${index + 1}") }
+    }
+    val jsonNotes = JSONArray().apply {
+        notes.forEach { (id, values) ->
+            put(JSONObject().apply {
+                put("id", id.toString())
+                put("fields", JSONArray().apply {
+                    repeat(fieldCount) { index -> put(values.getOrNull(index) ?: "") }
+                })
+            })
+        }
+    }
+    return JSONObject().apply {
+        put("format", "KanjiQuizWebDeck")
+        put("version", 1)
+        put("deck", JSONObject().apply {
+            put("name", deckName)
+            put("fields", fields)
+            put("notes", jsonNotes)
+        })
+    }.toString(2)
+}
+
 private fun loadDecks(resolver: ContentResolver): List<DeckInfo> {
     val decks = mutableListOf<DeckInfo>()
     resolver.query(DECKS_URI, null, null, null, null)?.use { c ->
@@ -411,6 +448,26 @@ private fun App() {
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted = it }
+
+    var pendingWebExport by remember { mutableStateOf<String?>(null) }
+    var webExportMessage by remember { mutableStateOf<String?>(null) }
+    val webExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                val content = pendingWebExport ?: error("書き出すデータがありません。")
+                val output = context.contentResolver.openOutputStream(uri)
+                    ?: error("保存先を開けませんでした。")
+                output.bufferedWriter(Charsets.UTF_8).use { it.write(content) }
+            }.onSuccess {
+                webExportMessage = "Web版用JSONを保存しました。Firefox版でこのファイルを読み込んでください。"
+            }.onFailure {
+                webExportMessage = "保存に失敗しました: ${it.message}"
+            }
+        }
+        pendingWebExport = null
+    }
 
     var settings by remember { mutableStateOf(store.loadSettings()) }
     var stage by remember { mutableStateOf(Stage.DECKS) }
@@ -519,6 +576,7 @@ private fun App() {
             autoAdvance = settings.autoAdvance,
             feedbackDeci = settings.feedbackDeci,
             weakPriority = settings.weakPriority,
+            maxAttempts = settings.maxAttempts.coerceIn(1, 99),
             choicePool = pool,
             dailyKey = if (gameMode == GameMode.DAILY) makeDailyKey(reverse) else null,
         )
@@ -668,6 +726,7 @@ private fun App() {
                 settings = settings,
                 dailyCompleted = dailyCompleted,
                 error = fieldError,
+                exportMessage = webExportMessage,
                 onToggleQ = { i ->
                     if (qFields.contains(i)) qFields.remove(i) else qFields.add(i)
                     fieldError = null
@@ -678,6 +737,11 @@ private fun App() {
                 },
                 onMode = { mode = it },
                 onChangeSettings = { settings = it; store.saveSettings(it) },
+                onExportWeb = {
+                    pendingWebExport = buildWebDeckJson(deckName, notes)
+                    webExportMessage = null
+                    webExportLauncher.launch("${safeFileName(deckName)}.kanjiquiz.json")
+                },
                 onStart = {
                     if (qFields.isEmpty() || aFields.isEmpty()) {
                         fieldError = "問題側とこたえ側を、それぞれ1つ以上選んでください。"
@@ -848,6 +912,29 @@ private fun DeckScreen(
 }
 
 @Composable
+private fun AttemptCountField(value: Int, onChange: (Int) -> Unit) {
+    var text by remember(value) { mutableStateOf(value.toString()) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { raw ->
+            val digits = raw.filter { it.isDigit() }.take(2)
+            text = digits
+            digits.toIntOrNull()?.takeIf { it in 1..99 }?.let(onChange)
+        },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        label = { Text("1問あたりの最大挑戦回数") },
+        supportingText = {
+            Text("不正解でも正解を表示せず、同じカードに再挑戦します（1〜99回）")
+        },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Number,
+            imeAction = ImeAction.Done,
+        ),
+    )
+}
+
+@Composable
 private fun SettingsScreen(settings: Settings, onChange: (Settings) -> Unit, onBack: () -> Unit) {
     BackHandler { onBack() }
     Column(modifier = Modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState())) {
@@ -860,6 +947,10 @@ private fun SettingsScreen(settings: Settings, onChange: (Settings) -> Unit, onB
         ChipRow("制限時間（1問あたり）",
             listOf("無制限" to 0, "10秒" to 10, "15秒" to 15, "20秒" to 20, "30秒" to 30),
             settings.timeLimitSec) { onChange(settings.copy(timeLimitSec = it)) }
+
+        AttemptCountField(settings.maxAttempts) { attempts ->
+            onChange(settings.copy(maxAttempts = attempts))
+        }
 
         Row(
             modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
@@ -1063,10 +1154,12 @@ private fun FieldScreen(
     settings: Settings,
     dailyCompleted: Boolean,
     error: String?,
+    exportMessage: String?,
     onToggleQ: (Int) -> Unit,
     onToggleA: (Int) -> Unit,
     onMode: (Mode) -> Unit,
     onChangeSettings: (Settings) -> Unit,
+    onExportWeb: () -> Unit,
     onStart: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -1136,6 +1229,10 @@ private fun FieldScreen(
                 settings.reverse,
             ) { onChangeSettings(settings.copy(reverse = it)) }
 
+            AttemptCountField(settings.maxAttempts) { attempts ->
+                onChangeSettings(settings.copy(maxAttempts = attempts))
+            }
+
             if (settings.gameMode in listOf(
                     GameMode.NORMAL,
                     GameMode.SURVIVAL,
@@ -1192,6 +1289,28 @@ private fun FieldScreen(
             }
         }
 
+        Spacer(Modifier.height(16.dp))
+        OutlinedButton(
+            onClick = onExportWeb,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Web版用JSONを保存")
+        }
+        Text(
+            "Firefox版へデッキを移すための読み取り専用ファイルです。AnkiDroidのデータは変更しません。",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        if (exportMessage != null) {
+            Text(
+                exportMessage,
+                color = if (exportMessage.startsWith("保存に失敗")) WrongRed else CorrectGreen,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+
         if (error != null) {
             Spacer(Modifier.height(12.dp))
             Text(error, color = WrongRed, fontSize = 13.sp)
@@ -1223,6 +1342,7 @@ private fun QuizScreen(
     val isCycling = isTimeAttack || isSurvival
     val perQuestionTimer = !isTimeAttack && config.timeLimitSec > 0
     val limit = config.timeLimitSec.toFloat()
+    val maxAttempts = config.maxAttempts.coerceIn(1, 99)
 
     var cycleItems by remember { mutableStateOf(baseItems) }
     val masteryQueue = remember {
@@ -1234,6 +1354,8 @@ private fun QuizScreen(
     val threeCorrectCounts = remember { mutableStateMapOf<Long, Int>() }
     var index by remember { mutableIntStateOf(0) }
     var questionSerial by remember { mutableIntStateOf(0) }
+    var attemptNumber by remember { mutableIntStateOf(1) }
+    var retryNotice by remember { mutableStateOf<String?>(null) }
     var input by remember { mutableStateOf("") }
     var remaining by remember { mutableFloatStateOf(limit) }
     var globalRemaining by remember { mutableFloatStateOf(TIME_ATTACK_SEC) }
@@ -1278,8 +1400,22 @@ private fun QuizScreen(
 
     fun resetForNextQuestion() {
         questionSerial++
+        attemptNumber = 1
+        retryNotice = null
         input = ""
         remaining = limit
+        lastTimeBonus = 0
+        phase = Phase.ASKING
+    }
+
+    fun retrySameQuestion() {
+        attemptNumber++
+        val remainingAttempts = maxAttempts - attemptNumber + 1
+        retryNotice = "不正解。あと${remainingAttempts}回挑戦できます。"
+        questionSerial++
+        input = ""
+        remaining = limit
+        lastGained = 0
         lastTimeBonus = 0
         phase = Phase.ASKING
     }
@@ -1344,6 +1480,15 @@ private fun QuizScreen(
 
     fun judge(correct: Boolean, recorded: String) {
         if (phase != Phase.ASKING || ended) return
+
+        val canRetry = !correct && recorded.isNotBlank() && attemptNumber < maxAttempts
+        if (canRetry) {
+            combo = 0
+            retrySameQuestion()
+            return
+        }
+
+        retryNotice = null
         if (correct) {
             combo++
             maxCombo = maxOf(maxCombo, combo)
@@ -1466,6 +1611,21 @@ private fun QuizScreen(
             fontWeight = FontWeight.Bold,
             fontSize = 14.sp,
         )
+        if (phase == Phase.ASKING && maxAttempts > 1) {
+            Text(
+                "挑戦 $attemptNumber / $maxAttempts",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 13.sp,
+            )
+        }
+        retryNotice?.let { notice ->
+            Text(
+                notice,
+                color = WrongRed,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
         Spacer(Modifier.height(8.dp))
         when {
             isTimeAttack -> LinearProgressIndicator(
@@ -1532,6 +1692,14 @@ private fun QuizScreen(
                     if (!lastCorrect && userInput.isNotEmpty()) {
                         Spacer(Modifier.height(6.dp))
                         Text("あなたの解答：$userInput", fontSize = 14.sp, color = WrongRed)
+                    }
+                    if (lastCorrect && attemptNumber > 1) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "${attemptNumber}回目の挑戦で正解",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     if (isThreeCorrect) {
                         Spacer(Modifier.height(6.dp))

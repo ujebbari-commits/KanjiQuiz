@@ -1,0 +1,15 @@
+{
+  "format": "KanjiQuizWebDeck",
+  "version": 1,
+  "deck": {
+    "name": "サンプル難読漢字",
+    "fields": ["漢字", "読み", "メモ"],
+    "notes": [
+      {"id": "sample-1", "fields": ["薔薇", "ばら", "植物"]},
+      {"id": "sample-2", "fields": ["躑躅", "つつじ", "植物"]},
+      {"id": "sample-3", "fields": ["蒲公英", "たんぽぽ", "植物"]},
+      {"id": "sample-4", "fields": ["海月", "くらげ", "生き物"]},
+      {"id": "sample-5", "fields": ["心太", "ところてん", "食べ物"]}
+    ]
+  }
+}
