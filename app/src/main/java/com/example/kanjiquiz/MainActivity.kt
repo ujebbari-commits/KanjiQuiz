@@ -79,6 +79,7 @@ import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.random.Random
@@ -95,7 +96,7 @@ private const val TIME_ATTACK_SEC = 60f
 // ============================================================
 //  設定（端末に保存）
 // ============================================================
-enum class GameMode { NORMAL, SURVIVAL, TIME_ATTACK }
+enum class GameMode { NORMAL, SURVIVAL, TIME_ATTACK, MASTERY, WEAK_CHALLENGE, DAILY }
 enum class Mode { QUIZ, FLASHCARD }
 
 data class Settings(
@@ -116,11 +117,29 @@ data class RoundConfig(
     val timeLimitSec: Int,
     val autoAdvance: Boolean,
     val feedbackDeci: Int,
+    val weakPriority: Boolean,
+    val choicePool: List<QuizItem>,
+    val dailyKey: String? = null,
+)
+
+data class RoundResult(
+    val logs: List<AnswerLog>,
+    val score: Int,
+    val maxCombo: Int,
+    val durationSec: Int,
 )
 
 data class HistoryEntry(
-    val timeMillis: Long, val deck: String,
-    val score: Int, val correct: Int, val total: Int,
+    val timeMillis: Long,
+    val deck: String,
+    val score: Int,
+    val correct: Int,
+    val total: Int,
+    val gameMode: GameMode = GameMode.NORMAL,
+    val reverse: Boolean = false,
+    val weakPriority: Boolean = false,
+    val maxCombo: Int = 0,
+    val durationSec: Int = 0,
 )
 
 class Store(context: Context) {
@@ -158,8 +177,21 @@ class Store(context: Context) {
             val arr = JSONArray(raw)
             (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
-                HistoryEntry(o.getLong("t"), o.getString("d"),
-                    o.getInt("s"), o.getInt("c"), o.getInt("n"))
+                val gameMode = runCatching {
+                    GameMode.valueOf(o.optString("m", GameMode.NORMAL.name))
+                }.getOrDefault(GameMode.NORMAL)
+                HistoryEntry(
+                    timeMillis = o.getLong("t"),
+                    deck = o.getString("d"),
+                    score = o.getInt("s"),
+                    correct = o.getInt("c"),
+                    total = o.getInt("n"),
+                    gameMode = gameMode,
+                    reverse = o.optBoolean("r", false),
+                    weakPriority = o.optBoolean("w", false),
+                    maxCombo = o.optInt("mc", 0),
+                    durationSec = o.optInt("dur", 0),
+                )
             }
         }.getOrDefault(emptyList())
     }
@@ -169,8 +201,16 @@ class Store(context: Context) {
         val arr = JSONArray()
         list.forEach {
             arr.put(JSONObject().apply {
-                put("t", it.timeMillis); put("d", it.deck)
-                put("s", it.score); put("c", it.correct); put("n", it.total)
+                put("t", it.timeMillis)
+                put("d", it.deck)
+                put("s", it.score)
+                put("c", it.correct)
+                put("n", it.total)
+                put("m", it.gameMode.name)
+                put("r", it.reverse)
+                put("w", it.weakPriority)
+                put("mc", it.maxCombo)
+                put("dur", it.durationSec)
             })
         }
         sp.edit().putString("history", arr.toString()).apply()
@@ -195,6 +235,20 @@ class Store(context: Context) {
         val o = JSONObject()
         map.forEach { (id, a) -> o.put(id.toString(), JSONArray().put(a[0]).put(a[1])) }
         sp.edit().putString("cardStats", o.toString()).apply()
+    }
+
+    fun todayKey(): String = dayFmt.format(Date())
+
+    fun isDailyCompleted(key: String): Boolean {
+        val raw = sp.getString("dailyCompleted", null) ?: return false
+        return runCatching { JSONObject(raw).optBoolean(key, false) }.getOrDefault(false)
+    }
+
+    fun markDailyCompleted(key: String) {
+        val o = runCatching { JSONObject(sp.getString("dailyCompleted", "{}") ?: "{}") }
+            .getOrDefault(JSONObject())
+        o.put(key, true)
+        sp.edit().putString("dailyCompleted", o.toString()).apply()
     }
 
     fun currentStreak(): Int {
@@ -226,6 +280,41 @@ data class QuizItem(
 )
 
 data class AnswerLog(val item: QuizItem, val correct: Boolean, val input: String)
+
+private fun gameModeLabel(mode: GameMode): String = when (mode) {
+    GameMode.NORMAL -> "通常"
+    GameMode.SURVIVAL -> "サバイバル"
+    GameMode.TIME_ATTACK -> "タイムアタック"
+    GameMode.MASTERY -> "定着復習"
+    GameMode.WEAK_CHALLENGE -> "苦手語チャレンジ"
+    GameMode.DAILY -> "デイリーチャレンジ"
+}
+
+private fun compactLength(s: String): Int = cleanText(s).filterNot { it.isWhitespace() }.length
+
+private fun kanjiCount(s: String): Int = s.count {
+    it in '\u3400'..'\u4DBF' || it in '\u4E00'..'\u9FFF' || it in '\uF900'..'\uFAFF'
+}
+
+private fun smartReverseChoices(item: QuizItem, pool: List<QuizItem>): List<String> {
+    val targetLength = compactLength(item.question)
+    val targetKanji = kanjiCount(item.question)
+    val targetAnswerLength = normalizeKana(item.displayAnswer).length
+    val ranked = pool
+        .filter {
+            it.noteId != item.noteId && it.question.isNotBlank() && it.question != item.question
+        }
+        .distinctBy { it.question }
+        .map { candidate ->
+            val distance = abs(compactLength(candidate.question) - targetLength) * 4 +
+                abs(kanjiCount(candidate.question) - targetKanji) * 6 +
+                abs(normalizeKana(candidate.displayAnswer).length - targetAnswerLength)
+            Triple(candidate.question, distance, Random.nextDouble())
+        }
+        .sortedWith(compareBy<Triple<String, Int, Double>> { it.second }.thenBy { it.third })
+    val distractors = ranked.take(12).shuffled().take(3).map { it.first }
+    return (distractors + item.question).distinct().shuffled()
+}
 
 private fun cleanText(s: String): String =
     s.replace(Regex("\\[sound:[^\\]]*\\]"), "")
@@ -337,54 +426,156 @@ private fun App() {
     var round by remember { mutableIntStateOf(0) }
     var lastLogs by remember { mutableStateOf<List<AnswerLog>>(emptyList()) }
     var lastScore by remember { mutableIntStateOf(0) }
+    var lastMaxCombo by remember { mutableIntStateOf(0) }
+    var lastDurationSec by remember { mutableIntStateOf(0) }
+    var lastConfig by remember { mutableStateOf<RoundConfig?>(null) }
+    var lastHistoryRecorded by remember { mutableStateOf(true) }
+    var lastMasteredCount by remember { mutableIntStateOf(0) }
 
     fun weightedOrder(list: List<QuizItem>): List<QuizItem> {
         val stats = store.loadCardStats()
         return list.map { item ->
             val wrong = stats[item.noteId]?.getOrNull(1) ?: 0
-            val w = 1.0 + wrong
-            val u = Random.nextDouble().coerceIn(1e-9, 1.0)
-            item to u.pow(1.0 / w)
+            val weight = 1.0 + wrong
+            val random = Random.nextDouble().coerceIn(1e-9, 1.0)
+            item to random.pow(1.0 / weight)
         }.sortedByDescending { it.second }.map { it.first }
     }
 
-    fun buildRoundItems(): List<QuizItem> {
-        val base = notes.map { (id, flds) ->
-            QuizItem(id, joinFields(flds, qFields), joinFields(flds, aFields),
-                acceptedFrom(flds, aFields))
-        }
-        val usable = base.filter {
-            if (settings.reverse) it.question.isNotBlank() && it.displayAnswer.isNotBlank()
+    fun buildUsableItems(reverse: Boolean = settings.reverse): List<QuizItem> {
+        return notes.map { (id, flds) ->
+            QuizItem(
+                noteId = id,
+                question = joinFields(flds, qFields),
+                displayAnswer = joinFields(flds, aFields),
+                accepted = acceptedFrom(flds, aFields),
+            )
+        }.filter {
+            if (reverse) it.question.isNotBlank() && it.displayAnswer.isNotBlank()
             else it.question.isNotBlank() && it.accepted.isNotEmpty()
         }
-        val ordered = if (settings.weakPriority) weightedOrder(usable) else usable.shuffled()
-        return if (settings.gameMode == GameMode.NORMAL && settings.count >= 0)
-            ordered.take(settings.count) else ordered
+    }
+
+    fun makeDailyKey(reverse: Boolean = settings.reverse): String = buildString {
+        append(store.todayKey())
+        append('|').append(deckName)
+        append('|').append(qFields.sorted().joinToString(","))
+        append('|').append(aFields.sorted().joinToString(","))
+        append('|').append(reverse)
+    }
+
+    fun selectRoundItems(usable: List<QuizItem>, gameMode: GameMode, reverse: Boolean): List<QuizItem> {
+        return when (gameMode) {
+            GameMode.NORMAL -> {
+                val ordered = if (settings.weakPriority) weightedOrder(usable) else usable.shuffled()
+                if (settings.count < 0) ordered else ordered.take(settings.count)
+            }
+            GameMode.SURVIVAL, GameMode.TIME_ATTACK -> {
+                if (settings.weakPriority) weightedOrder(usable) else usable.shuffled()
+            }
+            GameMode.WEAK_CHALLENGE -> {
+                val stats = store.loadCardStats()
+                usable.filter { (stats[it.noteId]?.getOrNull(1) ?: 0) > 0 }
+                    .map { item ->
+                        val stat = stats[item.noteId] ?: intArrayOf(0, 0)
+                        Triple(item, stat.getOrElse(1) { 0 }, stat.getOrElse(0) { 0 })
+                    }
+                    .sortedWith(
+                        compareByDescending<Triple<QuizItem, Int, Int>> { it.second }
+                            .thenBy { it.third }
+                    )
+                    .take(10)
+                    .map { it.first }
+            }
+            GameMode.DAILY -> {
+                val seed = makeDailyKey(reverse).hashCode()
+                usable.sortedBy { it.noteId }.shuffled(Random(seed)).take(10)
+            }
+            GameMode.MASTERY -> usable
+        }
+    }
+
+    fun createConfig(
+        gameMode: GameMode,
+        fixedItems: List<QuizItem>? = null,
+        reverse: Boolean = settings.reverse,
+    ): RoundConfig {
+        val pool = buildUsableItems(reverse)
+        val selected = fixedItems ?: selectRoundItems(pool, gameMode, reverse)
+        return RoundConfig(
+            items = selected.distinctBy { it.noteId },
+            gameMode = gameMode,
+            reverse = reverse,
+            timeLimitSec = settings.timeLimitSec,
+            autoAdvance = settings.autoAdvance,
+            feedbackDeci = settings.feedbackDeci,
+            weakPriority = settings.weakPriority,
+            choicePool = pool,
+            dailyKey = if (gameMode == GameMode.DAILY) makeDailyKey(reverse) else null,
+        )
     }
 
     fun buildFlash(): List<Pair<String, String>> {
         val list = notes.shuffled().mapNotNull { (_, flds) ->
-            val q = joinFields(flds, qFields); val a = joinFields(flds, aFields)
-            if (q.isBlank() && a.isBlank()) null else q to a
+            val question = joinFields(flds, qFields)
+            val answer = joinFields(flds, aFields)
+            if (question.isBlank() && answer.isBlank()) null else question to answer
         }
         return if (settings.count < 0) list else list.take(settings.count)
     }
 
-    fun recordAndFinish(logs: List<AnswerLog>, score: Int) {
+    fun recordAndFinish(result: RoundResult, finishedConfig: RoundConfig) {
         val stats = store.loadCardStats()
-        logs.forEach { l ->
-            val cur = stats[l.item.noteId] ?: intArrayOf(0, 0)
-            cur[0] += 1
-            cur[1] = if (l.correct) maxOf(0, cur[1] - 1) else minOf(10, cur[1] + 2)
-            stats[l.item.noteId] = cur
+        val beforeWrong = stats.mapValues { it.value.getOrElse(1) { 0 } }
+        result.logs.forEach { log ->
+            val current = stats[log.item.noteId] ?: intArrayOf(0, 0)
+            current[0] += 1
+            current[1] = if (log.correct) {
+                maxOf(0, current[1] - 1)
+            } else {
+                minOf(10, current[1] + 2)
+            }
+            stats[log.item.noteId] = current
         }
         store.saveCardStats(stats)
-        store.bumpStreak()
-        store.addHistory(
-            HistoryEntry(System.currentTimeMillis(), deckName, score,
-                logs.count { it.correct }, logs.size)
-        )
-        lastLogs = logs; lastScore = score; stage = Stage.RESULT
+
+        val completedSomething = result.logs.isNotEmpty()
+        val dailyAlreadyCompleted = finishedConfig.gameMode == GameMode.DAILY &&
+            finishedConfig.dailyKey?.let(store::isDailyCompleted) == true
+        val shouldRecord = completedSomething && !dailyAlreadyCompleted
+
+        if (completedSomething) store.bumpStreak()
+        if (shouldRecord) {
+            store.addHistory(
+                HistoryEntry(
+                    timeMillis = System.currentTimeMillis(),
+                    deck = deckName,
+                    score = result.score,
+                    correct = result.logs.count { it.correct },
+                    total = result.logs.size,
+                    gameMode = finishedConfig.gameMode,
+                    reverse = finishedConfig.reverse,
+                    weakPriority = finishedConfig.weakPriority,
+                    maxCombo = result.maxCombo,
+                    durationSec = result.durationSec,
+                )
+            )
+            if (finishedConfig.gameMode == GameMode.DAILY) {
+                finishedConfig.dailyKey?.let(store::markDailyCompleted)
+            }
+        }
+
+        val attemptedIds = result.logs.map { it.item.noteId }.toSet()
+        lastMasteredCount = attemptedIds.count { id ->
+            (beforeWrong[id] ?: 0) > 0 && (stats[id]?.getOrElse(1) { 0 } ?: 0) == 0
+        }
+        lastLogs = result.logs
+        lastScore = result.score
+        lastMaxCombo = result.maxCombo
+        lastDurationSec = result.durationSec
+        lastConfig = finishedConfig
+        lastHistoryRecorded = shouldRecord
+        stage = Stage.RESULT
     }
 
     if (!granted) {
@@ -406,7 +597,9 @@ private fun App() {
                     }
             }
             DeckScreen(
-                decks = decks, error = loadError, streak = store.currentStreak(),
+                decks = decks,
+                error = loadError,
+                streak = store.currentStreak(),
                 onRetry = { decks = null; deckReload++ },
                 onHistory = { stage = Stage.HISTORY },
                 onSettings = { stage = Stage.SETTINGS },
@@ -416,14 +609,22 @@ private fun App() {
                         withContext(Dispatchers.IO) {
                             runCatching { loadNotes(context.contentResolver, deck.name) }
                         }.onSuccess { loaded ->
-                            if (loaded.isEmpty()) loadError = "「${deck.name}」からノートを取得できませんでした。"
-                            else {
-                                deckName = deck.name; notes = loaded
-                                qFields.clear(); qFields.add(0)
-                                aFields.clear(); aFields.add(if (loaded.first().second.size > 1) 1 else 0)
-                                mode = Mode.QUIZ; fieldError = null; stage = Stage.FIELDS
+                            if (loaded.isEmpty()) {
+                                loadError = "「${deck.name}」からノートを取得できませんでした。"
+                            } else {
+                                deckName = deck.name
+                                notes = loaded
+                                qFields.clear()
+                                qFields.add(0)
+                                aFields.clear()
+                                aFields.add(if (loaded.first().second.size > 1) 1 else 0)
+                                mode = Mode.QUIZ
+                                fieldError = null
+                                stage = Stage.FIELDS
                             }
-                        }.onFailure { loadError = "ノートの取得に失敗しました: ${it.message}" }
+                        }.onFailure {
+                            loadError = "ノートの取得に失敗しました: ${it.message}"
+                        }
                     }
                 },
             )
@@ -441,66 +642,116 @@ private fun App() {
             onBack = { stage = Stage.DECKS },
         )
 
-        Stage.FIELDS -> FieldScreen(
-            deckName = deckName, sample = notes.first().second,
-            qFields = qFields, aFields = aFields, mode = mode, settings = settings,
-            error = fieldError,
-            onToggleQ = { i -> if (qFields.contains(i)) qFields.remove(i) else qFields.add(i); fieldError = null },
-            onToggleA = { i -> if (aFields.contains(i)) aFields.remove(i) else aFields.add(i); fieldError = null },
-            onMode = { mode = it },
-            onChangeSettings = { settings = it; store.saveSettings(it) },
-            onStart = {
-                if (qFields.isEmpty() || aFields.isEmpty()) {
-                    fieldError = "問題側とこたえ側を、それぞれ1つ以上選んでください。"
-                    return@FieldScreen
-                }
-                if (mode == Mode.QUIZ) {
-                    val built = buildRoundItems()
-                    if (built.isEmpty()) fieldError = "この組み合わせでは問題を作れませんでした。"
-                    else {
-                        config = RoundConfig(built, settings.gameMode, settings.reverse,
-                            settings.timeLimitSec, settings.autoAdvance, settings.feedbackDeci)
-                        round++; stage = Stage.QUIZ
+        Stage.FIELDS -> {
+            val dailyCompleted = if (settings.gameMode == GameMode.DAILY &&
+                qFields.isNotEmpty() && aFields.isNotEmpty()
+            ) {
+                store.isDailyCompleted(makeDailyKey())
+            } else {
+                false
+            }
+            FieldScreen(
+                deckName = deckName,
+                sample = notes.first().second,
+                qFields = qFields,
+                aFields = aFields,
+                mode = mode,
+                settings = settings,
+                dailyCompleted = dailyCompleted,
+                error = fieldError,
+                onToggleQ = { i ->
+                    if (qFields.contains(i)) qFields.remove(i) else qFields.add(i)
+                    fieldError = null
+                },
+                onToggleA = { i ->
+                    if (aFields.contains(i)) aFields.remove(i) else aFields.add(i)
+                    fieldError = null
+                },
+                onMode = { mode = it },
+                onChangeSettings = { settings = it; store.saveSettings(it) },
+                onStart = {
+                    if (qFields.isEmpty() || aFields.isEmpty()) {
+                        fieldError = "問題側とこたえ側を、それぞれ1つ以上選んでください。"
+                        return@FieldScreen
                     }
-                } else {
-                    val built = buildFlash()
-                    if (built.isEmpty()) fieldError = "この組み合わせでは表示できるカードがありません。"
-                    else { flashItems = built; round++; stage = Stage.FLASHCARD }
-                }
-            },
-            onBack = { stage = Stage.DECKS },
-        )
+                    if (mode == Mode.QUIZ) {
+                        val builtConfig = createConfig(settings.gameMode)
+                        if (builtConfig.items.isEmpty()) {
+                            fieldError = if (settings.gameMode == GameMode.WEAK_CHALLENGE) {
+                                "苦手語がまだありません。まず通常モードなどで問題を解いてください。"
+                            } else {
+                                "この組み合わせでは問題を作れませんでした。"
+                            }
+                        } else {
+                            config = builtConfig
+                            round++
+                            stage = Stage.QUIZ
+                        }
+                    } else {
+                        val built = buildFlash()
+                        if (built.isEmpty()) {
+                            fieldError = "この組み合わせでは表示できるカードがありません。"
+                        } else {
+                            flashItems = built
+                            round++
+                            stage = Stage.FLASHCARD
+                        }
+                    }
+                },
+                onBack = { stage = Stage.DECKS },
+            )
+        }
 
         Stage.QUIZ -> key(round) {
+            val currentConfig = config!!
             QuizScreen(
-                config = config!!,
-                onFinish = { logs, score -> recordAndFinish(logs, score) },
+                config = currentConfig,
+                onFinish = { result -> recordAndFinish(result, currentConfig) },
                 onQuit = { stage = Stage.DECKS },
             )
         }
 
         Stage.FLASHCARD -> key(round) {
             FlashcardScreen(
-                items = flashItems, secDeci = settings.flashcardDeci,
+                items = flashItems,
+                secDeci = settings.flashcardDeci,
                 onDone = { stage = Stage.FIELDS },
             )
         }
 
         Stage.RESULT -> {
-            val missed = lastLogs.filter { !it.correct }.map { it.item }
+            val finishedConfig = lastConfig!!
+            val missed = lastLogs.filter { !it.correct }.map { it.item }.distinctBy { it.noteId }
             ResultScreen(
-                logs = lastLogs, score = lastScore,
-                countLabel = if (settings.count < 0) "全部" else "${settings.count}問",
+                logs = lastLogs,
+                score = lastScore,
+                gameMode = finishedConfig.gameMode,
+                maxCombo = lastMaxCombo,
+                durationSec = lastDurationSec,
+                historyRecorded = lastHistoryRecorded,
+                masteredCount = lastMasteredCount,
                 missedCount = missed.size,
                 onRetry = {
-                    config = RoundConfig(buildRoundItems(), settings.gameMode, settings.reverse,
-                        settings.timeLimitSec, settings.autoAdvance, settings.feedbackDeci)
-                    round++; stage = Stage.QUIZ
+                    config = if (finishedConfig.gameMode == GameMode.MASTERY) {
+                        createConfig(
+                            gameMode = GameMode.MASTERY,
+                            fixedItems = finishedConfig.items,
+                            reverse = finishedConfig.reverse,
+                        )
+                    } else {
+                        createConfig(finishedConfig.gameMode, reverse = finishedConfig.reverse)
+                    }
+                    round++
+                    stage = Stage.QUIZ
                 },
                 onRetryMissed = {
-                    config = RoundConfig(missed, GameMode.NORMAL, settings.reverse,
-                        settings.timeLimitSec, settings.autoAdvance, settings.feedbackDeci)
-                    round++; stage = Stage.QUIZ
+                    config = createConfig(
+                        gameMode = GameMode.MASTERY,
+                        fixedItems = missed,
+                        reverse = finishedConfig.reverse,
+                    )
+                    round++
+                    stage = Stage.QUIZ
                 },
                 onDecks = { stage = Stage.DECKS },
             )
@@ -630,9 +881,22 @@ private fun SettingsScreen(settings: Settings, onChange: (Settings) -> Unit, onB
 private fun HistoryScreen(entries: List<HistoryEntry>, onClear: () -> Unit, onBack: () -> Unit) {
     BackHandler { onBack() }
     var cleared by remember { mutableStateOf(false) }
+    var deckFilter by remember { mutableStateOf("ALL") }
+    var modeFilter by remember { mutableStateOf("ALL") }
+    var directionFilter by remember { mutableStateOf("ALL") }
     val list = if (cleared) emptyList() else entries
+    val deckOptions = list.map { it.deck }.distinct().sorted()
+    val modeOptions = list.map { it.gameMode }.distinct().sortedBy { it.ordinal }
+    val filtered = list.filter { entry ->
+        (deckFilter == "ALL" || entry.deck == deckFilter) &&
+            (modeFilter == "ALL" || entry.gameMode.name == modeFilter) &&
+            (directionFilter == "ALL" ||
+                (directionFilter == "REVERSE" && entry.reverse) ||
+                (directionFilter == "FORWARD" && !entry.reverse))
+    }
     val fmt = remember { SimpleDateFormat("M/d HH:mm", Locale.JAPAN) }
-    val rates = list.reversed().map { if (it.total == 0) 0 else it.correct * 100 / it.total }
+    val rates = filtered.reversed()
+        .map { if (it.total == 0) 0 else it.correct * 100 / it.total }
         .takeLast(20)
 
     Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
@@ -642,41 +906,106 @@ private fun HistoryScreen(entries: List<HistoryEntry>, onClear: () -> Unit, onBa
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("ゲーム履歴", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            if (list.isNotEmpty()) TextButton(onClick = { onClear(); cleared = true }) { Text("消去") }
+            if (list.isNotEmpty()) {
+                TextButton(onClick = { onClear(); cleared = true }) { Text("消去") }
+            }
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(4.dp))
 
         if (list.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text("まだ記録がありません", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
-            Text("正答率の推移", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-            Spacer(Modifier.height(6.dp))
-            AccuracyChart(rates)
-            Spacer(Modifier.height(12.dp))
-            LazyColumn(modifier = Modifier.weight(1f)) {
-                items(list) { e ->
-                    val rate = if (e.total == 0) 0 else e.correct * 100 / e.total
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        tonalElevation = 2.dp, shape = RoundedCornerShape(12.dp),
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                            ) {
-                                Text(e.deck, fontWeight = FontWeight.Bold, maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                Text(fmt.format(Date(e.timeMillis)), fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            ChipRow(
+                label = "デッキ",
+                options = listOf("全部" to "ALL") + deckOptions.map { it to it },
+                selected = deckFilter,
+                onSelect = { deckFilter = it },
+            )
+            ChipRow(
+                label = "ゲーム形式",
+                options = listOf("全部" to "ALL") + modeOptions.map { gameModeLabel(it) to it.name },
+                selected = modeFilter,
+                onSelect = { modeFilter = it },
+            )
+            ChipRow(
+                label = "出題方向",
+                options = listOf(
+                    "全部" to "ALL",
+                    "漢字→よみ" to "FORWARD",
+                    "よみ→漢字" to "REVERSE",
+                ),
+                selected = directionFilter,
+                onSelect = { directionFilter = it },
+            )
+
+            if (filtered.isEmpty()) {
+                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Text("この条件の記録はありません",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                Text("正答率の推移（選択中の条件）", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Spacer(Modifier.height(6.dp))
+                AccuracyChart(rates)
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(modifier = Modifier.weight(1f)) {
+                    items(filtered) { entry ->
+                        val rate = if (entry.total == 0) 0 else entry.correct * 100 / entry.total
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            tonalElevation = 2.dp,
+                            shape = RoundedCornerShape(12.dp),
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Text(
+                                        entry.deck,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Text(
+                                        fmt.format(Date(entry.timeMillis)),
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                val direction = if (entry.reverse) "よみ→漢字" else "漢字→よみ"
+                                val weak = if (entry.weakPriority &&
+                                    entry.gameMode in listOf(
+                                        GameMode.NORMAL,
+                                        GameMode.SURVIVAL,
+                                        GameMode.TIME_ATTACK,
+                                    )
+                                ) "・苦手優先" else ""
+                                Text(
+                                    "${gameModeLabel(entry.gameMode)}・$direction$weak",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    "SCORE ${entry.score}　正解 ${entry.correct}/${entry.total}（$rate%）",
+                                    fontSize = 14.sp,
+                                )
+                                if (entry.maxCombo > 0 || entry.durationSec > 0) {
+                                    Text(
+                                        "最大コンボ ${entry.maxCombo}　${entry.durationSec}秒",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
-                            Spacer(Modifier.height(4.dp))
-                            Text("SCORE ${e.score}　正解 ${e.correct}/${e.total}（$rate%）", fontSize = 14.sp)
                         }
+                        Spacer(Modifier.height(8.dp))
                     }
-                    Spacer(Modifier.height(8.dp))
                 }
             }
         }
@@ -712,81 +1041,143 @@ private fun AccuracyChart(rates: List<Int>) {
 
 @Composable
 private fun FieldScreen(
-    deckName: String, sample: List<String>,
-    qFields: List<Int>, aFields: List<Int>, mode: Mode, settings: Settings,
+    deckName: String,
+    sample: List<String>,
+    qFields: List<Int>,
+    aFields: List<Int>,
+    mode: Mode,
+    settings: Settings,
+    dailyCompleted: Boolean,
     error: String?,
-    onToggleQ: (Int) -> Unit, onToggleA: (Int) -> Unit,
-    onMode: (Mode) -> Unit, onChangeSettings: (Settings) -> Unit,
-    onStart: () -> Unit, onBack: () -> Unit,
+    onToggleQ: (Int) -> Unit,
+    onToggleA: (Int) -> Unit,
+    onMode: (Mode) -> Unit,
+    onChangeSettings: (Settings) -> Unit,
+    onStart: () -> Unit,
+    onBack: () -> Unit,
 ) {
     BackHandler { onBack() }
-    fun preview(i: Int, v: String): String {
-        val t = cleanText(v).replace("\n", " ⏎ ")
-        val body = if (t.length > 24) t.take(24) + "…" else t
+    fun preview(i: Int, value: String): String {
+        val text = cleanText(value).replace("\n", " ⏎ ")
+        val body = if (text.length > 24) text.take(24) + "…" else text
         return "フィールド${i + 1}：" + body.ifBlank { "（空）" }
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState())) {
-        Text(deckName, fontSize = 22.sp, fontWeight = FontWeight.Bold,
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            deckName,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
         Spacer(Modifier.height(8.dp))
 
-        ChipRow("モード",
+        ChipRow(
+            "モード",
             listOf("クイズ" to Mode.QUIZ, "めくり（自動送り）" to Mode.FLASHCARD),
-            mode, onMode)
+            mode,
+            onMode,
+        )
 
         if (mode == Mode.QUIZ) {
-            ChipRow("ゲーム形式",
-                listOf("通常" to GameMode.NORMAL, "サバイバル(3ミス)" to GameMode.SURVIVAL,
-                    "タイムアタック(60秒)" to GameMode.TIME_ATTACK),
-                settings.gameMode) { onChangeSettings(settings.copy(gameMode = it)) }
+            ChipRow(
+                "ゲーム形式",
+                listOf(
+                    "通常" to GameMode.NORMAL,
+                    "サバイバル" to GameMode.SURVIVAL,
+                    "タイムアタック" to GameMode.TIME_ATTACK,
+                    "苦手語" to GameMode.WEAK_CHALLENGE,
+                    "デイリー" to GameMode.DAILY,
+                ),
+                settings.gameMode,
+            ) { onChangeSettings(settings.copy(gameMode = it)) }
 
-            ChipRow("出題の向き",
+            Text(
+                when (settings.gameMode) {
+                    GameMode.NORMAL -> "設定した問題数を解きます。"
+                    GameMode.SURVIVAL -> "3回間違えるまで、問題を繰り返し出題します。"
+                    GameMode.TIME_ATTACK -> "60秒が終わるまで出題します。正解で時間が増えます。"
+                    GameMode.WEAK_CHALLENGE -> "苦手度が高い語を最大10語出題します。"
+                    GameMode.DAILY -> "今日固定の10問です。正式記録は1日1回です。"
+                    GameMode.MASTERY -> "間違えた語を全て正解するまで繰り返します。"
+                },
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (settings.gameMode == GameMode.DAILY && dailyCompleted) {
+                Text(
+                    "今日の正式記録は保存済みです。再挑戦はできますが履歴には追加されません。",
+                    fontSize = 12.sp,
+                    color = ComboOrange,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+
+            ChipRow(
+                "出題の向き",
                 listOf("通常（漢字→よみ入力）" to false, "逆（よみ→漢字4択）" to true),
-                settings.reverse) { onChangeSettings(settings.copy(reverse = it)) }
+                settings.reverse,
+            ) { onChangeSettings(settings.copy(reverse = it)) }
 
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+            if (settings.gameMode in listOf(
+                    GameMode.NORMAL,
+                    GameMode.SURVIVAL,
+                    GameMode.TIME_ATTACK,
+                )
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("苦手カードを優先", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                    Text("よく間違える語ほど出やすくなります",
-                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("苦手カードを優先", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        Text(
+                            "よく間違える語ほど先に出やすくなります",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = settings.weakPriority,
+                        onCheckedChange = { onChangeSettings(settings.copy(weakPriority = it)) },
+                    )
                 }
-                Switch(checked = settings.weakPriority,
-                    onCheckedChange = { onChangeSettings(settings.copy(weakPriority = it)) })
             }
         }
 
         Spacer(Modifier.height(8.dp))
         Text("問題として表示する側（複数選ぶと連結）", fontWeight = FontWeight.Bold)
-        sample.forEachIndexed { i, v ->
+        sample.forEachIndexed { i, value ->
             Row(
                 modifier = Modifier.fillMaxWidth().clickable { onToggleQ(i) },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Checkbox(checked = qFields.contains(i), onCheckedChange = { onToggleQ(i) })
-                Text(preview(i, v), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(preview(i, value), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
 
         Spacer(Modifier.height(12.dp))
-        Text(if (mode == Mode.QUIZ) "こたえ側（複数選ぶと連結）" else "裏に表示する側（複数選ぶと連結）",
-            fontWeight = FontWeight.Bold)
-        sample.forEachIndexed { i, v ->
+        Text(
+            if (mode == Mode.QUIZ) "こたえ側（複数選ぶと連結）"
+            else "裏に表示する側（複数選ぶと連結）",
+            fontWeight = FontWeight.Bold,
+        )
+        sample.forEachIndexed { i, value ->
             Row(
                 modifier = Modifier.fillMaxWidth().clickable { onToggleA(i) },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Checkbox(checked = aFields.contains(i), onCheckedChange = { onToggleA(i) })
-                Text(preview(i, v), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(preview(i, value), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
 
         if (error != null) {
-            Spacer(Modifier.height(12.dp)); Text(error, color = WrongRed, fontSize = 13.sp)
+            Spacer(Modifier.height(12.dp))
+            Text(error, color = WrongRed, fontSize = 13.sp)
         }
 
         Spacer(Modifier.height(24.dp))
@@ -803,91 +1194,178 @@ private enum class Phase { ASKING, FEEDBACK }
 @Composable
 private fun QuizScreen(
     config: RoundConfig,
-    onFinish: (List<AnswerLog>, Int) -> Unit,
+    onFinish: (RoundResult) -> Unit,
     onQuit: () -> Unit,
 ) {
-    val items = config.items
+    val baseItems = config.items
     val reverse = config.reverse
-    val isTA = config.gameMode == GameMode.TIME_ATTACK
-    val isSurv = config.gameMode == GameMode.SURVIVAL
-    val perQTimer = !isTA && config.timeLimitSec > 0
+    val isTimeAttack = config.gameMode == GameMode.TIME_ATTACK
+    val isSurvival = config.gameMode == GameMode.SURVIVAL
+    val isMastery = config.gameMode == GameMode.MASTERY
+    val isCycling = isTimeAttack || isSurvival
+    val perQuestionTimer = !isTimeAttack && config.timeLimitSec > 0
     val limit = config.timeLimitSec.toFloat()
-    val pool = remember { items.map { it.question }.filter { it.isNotBlank() }.distinct() }
 
+    var cycleItems by remember { mutableStateOf(baseItems) }
+    val masteryQueue = remember {
+        mutableStateListOf<QuizItem>().apply { addAll(baseItems.shuffled()) }
+    }
     var index by remember { mutableIntStateOf(0) }
+    var questionSerial by remember { mutableIntStateOf(0) }
     var input by remember { mutableStateOf("") }
     var remaining by remember { mutableFloatStateOf(limit) }
     var globalRemaining by remember { mutableFloatStateOf(TIME_ATTACK_SEC) }
     var phase by remember { mutableStateOf(Phase.ASKING) }
     var lastCorrect by remember { mutableStateOf(false) }
     var lastGained by remember { mutableIntStateOf(0) }
+    var lastTimeBonus by remember { mutableIntStateOf(0) }
     var score by remember { mutableIntStateOf(0) }
     var combo by remember { mutableIntStateOf(0) }
+    var maxCombo by remember { mutableIntStateOf(0) }
     var lives by remember { mutableIntStateOf(3) }
     var ended by remember { mutableStateOf(false) }
     var showConfirm by remember { mutableStateOf(false) }
     val logs = remember { mutableStateListOf<AnswerLog>() }
     val focusRequester = remember { FocusRequester() }
+    val startedAt = remember { System.currentTimeMillis() }
 
-    val item = items[index]
+    val item = if (isMastery) masteryQueue.first() else cycleItems[index]
     val promptText = if (reverse) item.displayAnswer else item.question
     val answerText = if (reverse) item.question else item.displayAnswer
-    val choices = remember(index) {
-        if (!reverse) emptyList()
-        else (pool.filter { it != item.question }.shuffled().take(3) + item.question).shuffled()
+    val choices = remember(questionSerial, item.noteId) {
+        if (reverse) smartReverseChoices(item, config.choicePool) else emptyList()
     }
 
-    fun finish() { if (!ended) { ended = true; onFinish(logs.toList(), score) } }
+    fun finish() {
+        if (ended) return
+        ended = true
+        val durationSec = ((System.currentTimeMillis() - startedAt) / 1000L).toInt()
+        onFinish(
+            RoundResult(
+                logs = logs.toList(),
+                score = score,
+                maxCombo = maxCombo,
+                durationSec = durationSec,
+            )
+        )
+    }
+
+    fun resetForNextQuestion() {
+        questionSerial++
+        input = ""
+        remaining = limit
+        lastTimeBonus = 0
+        phase = Phase.ASKING
+    }
+
+    fun reshuffleAvoidingLast(last: QuizItem): List<QuizItem> {
+        val next = baseItems.shuffled().toMutableList()
+        if (next.size > 1 && next.first().noteId == last.noteId) {
+            val swapIndex = next.indexOfFirst { it.noteId != last.noteId }
+            if (swapIndex > 0) {
+                val first = next[0]
+                next[0] = next[swapIndex]
+                next[swapIndex] = first
+            }
+        }
+        return next
+    }
 
     fun goNext() {
-        if (phase != Phase.FEEDBACK) return
-        if (isSurv && lives <= 0) { finish(); return }
-        if (index + 1 >= items.size) { finish(); return }
-        index++; input = ""; remaining = limit; phase = Phase.ASKING
+        if (phase != Phase.FEEDBACK || ended) return
+        if (isSurvival && lives <= 0) {
+            finish()
+            return
+        }
+
+        if (isMastery) {
+            if (lastCorrect && masteryQueue.size == 1) {
+                finish()
+                return
+            }
+            val answered = masteryQueue.removeAt(0)
+            if (!lastCorrect) masteryQueue.add(answered)
+            resetForNextQuestion()
+            return
+        }
+
+        if (index + 1 < cycleItems.size) {
+            index++
+            resetForNextQuestion()
+            return
+        }
+
+        if (isCycling) {
+            cycleItems = reshuffleAvoidingLast(item)
+            index = 0
+            resetForNextQuestion()
+        } else {
+            finish()
+        }
     }
 
-    fun judge(ok: Boolean, recorded: String) {
+    fun judge(correct: Boolean, recorded: String) {
         if (phase != Phase.ASKING || ended) return
-        if (ok) {
+        if (correct) {
             combo++
-            val speed = if (perQTimer) (remaining / limit * 50).roundToInt() else 0
+            maxCombo = maxOf(maxCombo, combo)
+            val speed = if (perQuestionTimer) {
+                (remaining / limit * 50).roundToInt()
+            } else {
+                0
+            }
             lastGained = 50 + speed + (combo - 1) * 5
             score += lastGained
+            if (isTimeAttack) {
+                val comboTimeBonus = if (combo % 5 == 0) 2 else 0
+                lastTimeBonus = 1 + comboTimeBonus
+                globalRemaining = (globalRemaining + lastTimeBonus).coerceAtMost(TIME_ATTACK_SEC)
+            }
         } else {
-            combo = 0; lastGained = 0
-            if (isSurv) lives -= 1
+            combo = 0
+            lastGained = 0
+            lastTimeBonus = 0
+            if (isSurvival) lives -= 1
         }
-        lastCorrect = ok
-        logs.add(AnswerLog(item, ok, recorded))
+        lastCorrect = correct
+        logs.add(AnswerLog(item, correct, recorded))
         phase = Phase.FEEDBACK
     }
 
     BackHandler { showConfirm = true }
 
     LaunchedEffect(Unit) {
-        if (isTA) {
+        if (isTimeAttack) {
             while (globalRemaining > 0f && !ended) {
                 delay(100)
-                if (!showConfirm) globalRemaining = (globalRemaining - 0.1f).coerceAtLeast(0f)
+                if (!showConfirm) {
+                    globalRemaining = (globalRemaining - 0.1f).coerceAtLeast(0f)
+                }
             }
             if (!ended) finish()
         }
     }
 
-    LaunchedEffect(index, phase) {
+    LaunchedEffect(questionSerial, phase) {
         if (phase == Phase.ASKING) {
             delay(100)
             if (!reverse) runCatching { focusRequester.requestFocus() }
-            if (perQTimer) {
-                while (remaining > 0f && !ended) {
+            if (perQuestionTimer) {
+                while (remaining > 0f && !ended && phase == Phase.ASKING) {
                     delay(100)
-                    if (!showConfirm) remaining = (remaining - 0.1f).coerceAtLeast(0f)
+                    if (!showConfirm) {
+                        remaining = (remaining - 0.1f).coerceAtLeast(0f)
+                    }
                 }
-                if (!ended && remaining <= 0f) judge(false, "")
+                if (!ended && remaining <= 0f && phase == Phase.ASKING) judge(false, "")
             }
         } else if (config.autoAdvance) {
-            delay(config.feedbackDeci * 100L)
-            goNext()
+            var waitDeci = config.feedbackDeci
+            while (waitDeci > 0 && !ended && phase == Phase.FEEDBACK) {
+                delay(100)
+                if (!showConfirm) waitDeci--
+            }
+            if (!ended && phase == Phase.FEEDBACK) goNext()
         }
     }
 
@@ -896,8 +1374,12 @@ private fun QuizScreen(
             onDismissRequest = { showConfirm = false },
             title = { Text("ホームに戻る") },
             text = { Text("プレイ中です。ホームに戻ると今回の結果は記録されません。") },
-            confirmButton = { TextButton(onClick = { showConfirm = false; onQuit() }) { Text("戻る") } },
-            dismissButton = { TextButton(onClick = { showConfirm = false }) { Text("続ける") } },
+            confirmButton = {
+                TextButton(onClick = { showConfirm = false; onQuit() }) { Text("戻る") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirm = false }) { Text("続ける") }
+            },
         )
     }
 
@@ -908,60 +1390,118 @@ private fun QuizScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             when {
-                isTA -> Text("残り ${globalRemaining.roundToInt()}秒",
+                isTimeAttack -> Text(
+                    "残り ${globalRemaining.roundToInt()}秒・${logs.size}問",
                     fontWeight = FontWeight.Bold,
-                    color = if (globalRemaining < 10f) WrongRed else MaterialTheme.colorScheme.onSurface)
-                isSurv -> Text("❤".repeat(lives.coerceAtLeast(0)) + "🤍".repeat((3 - lives).coerceAtLeast(0)))
-                else -> Text("${index + 1} / ${items.size}",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    color = if (globalRemaining < 10f) WrongRed
+                    else MaterialTheme.colorScheme.onSurface,
+                )
+                isSurvival -> Text(
+                    "${"❤".repeat(lives.coerceAtLeast(0))}${"🤍".repeat((3 - lives).coerceIn(0, 3))}" +
+                        "・${logs.size}問",
+                )
+                isMastery -> Text(
+                    "残り ${masteryQueue.size}語",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                else -> Text(
+                    "${index + 1} / ${cycleItems.size}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("SCORE $score", fontWeight = FontWeight.Bold)
                 TextButton(onClick = { showConfirm = true }) { Text("やめる") }
             }
         }
-        Text(if (combo >= 2) "🔥 $combo COMBO" else "",
-            color = ComboOrange, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        Text(
+            if (combo >= 2) "🔥 $combo COMBO" else "",
+            color = ComboOrange,
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp,
+        )
         Spacer(Modifier.height(8.dp))
-        if (perQTimer) {
-            LinearProgressIndicator(
-                progress = { remaining / limit },
+        when {
+            isTimeAttack -> LinearProgressIndicator(
+                progress = { (globalRemaining / TIME_ATTACK_SEC).coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth().height(8.dp),
-                color = if (remaining < limit * 0.3f) WrongRed else MaterialTheme.colorScheme.primary,
+                color = if (globalRemaining < 10f) WrongRed else MaterialTheme.colorScheme.primary,
+            )
+            perQuestionTimer -> LinearProgressIndicator(
+                progress = { (remaining / limit).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(8.dp),
+                color = if (remaining < limit * 0.3f) WrongRed
+                else MaterialTheme.colorScheme.primary,
             )
         }
 
         Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             if (phase == Phase.ASKING) {
-                Text(promptText, fontSize = 44.sp, lineHeight = 56.sp,
-                    fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                Text(
+                    promptText,
+                    fontSize = 44.sp,
+                    lineHeight = 56.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                )
             } else {
                 val userInput = logs.lastOrNull()?.input ?: ""
-                Column(horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                ) {
                     Text(
                         when {
                             lastCorrect -> "⭕ 正解！"
                             userInput.isEmpty() -> "⏰ 時間切れ・パス"
                             else -> "❌ 不正解"
                         },
-                        fontSize = 28.sp, fontWeight = FontWeight.Bold,
-                        color = if (lastCorrect) CorrectGreen else WrongRed)
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (lastCorrect) CorrectGreen else WrongRed,
+                    )
                     Spacer(Modifier.height(14.dp))
-                    Text(promptText, fontSize = 30.sp, lineHeight = 40.sp,
-                        fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                    Text(
+                        promptText,
+                        fontSize = 30.sp,
+                        lineHeight = 40.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                    )
                     Spacer(Modifier.height(6.dp))
-                    Text(answerText, fontSize = 22.sp, lineHeight = 30.sp,
-                        textAlign = TextAlign.Center, fontWeight = FontWeight.Bold,
-                        color = CorrectGreen)
+                    Text(
+                        answerText,
+                        fontSize = 22.sp,
+                        lineHeight = 30.sp,
+                        textAlign = TextAlign.Center,
+                        fontWeight = FontWeight.Bold,
+                        color = CorrectGreen,
+                    )
                     if (!lastCorrect && userInput.isNotEmpty()) {
                         Spacer(Modifier.height(6.dp))
                         Text("あなたの解答：$userInput", fontSize = 14.sp, color = WrongRed)
                     }
                     if (lastCorrect) {
                         Spacer(Modifier.height(6.dp))
-                        Text("+$lastGained", fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold, color = CorrectGreen)
+                        Text(
+                            "+$lastGained",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = CorrectGreen,
+                        )
+                        if (isTimeAttack && lastTimeBonus > 0) {
+                            val bonusLabel = if (lastTimeBonus >= 3) {
+                                "⏱ +${lastTimeBonus}秒（5コンボボーナス）"
+                            } else {
+                                "⏱ +${lastTimeBonus}秒"
+                            }
+                            Text(
+                                bonusLabel,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ComboOrange,
+                            )
+                        }
                     }
                 }
             }
@@ -969,34 +1509,49 @@ private fun QuizScreen(
 
         if (phase == Phase.ASKING) {
             if (reverse) {
-                choices.forEach { opt ->
-                    Button(onClick = { judge(opt == item.question, opt) },
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                        Text(opt.replace("\n", " "), fontSize = 20.sp)
+                choices.forEach { option ->
+                    Button(
+                        onClick = { judge(option == item.question, option) },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    ) {
+                        Text(option.replace("\n", " "), fontSize = 20.sp)
                     }
                 }
-                TextButton(onClick = { judge(false, "") }, modifier = Modifier.align(Alignment.End)) {
+                TextButton(
+                    onClick = { judge(false, "") },
+                    modifier = Modifier.align(Alignment.End),
+                ) {
                     Text("パス →")
                 }
             } else {
                 OutlinedTextField(
-                    value = input, onValueChange = { input = it },
+                    value = input,
+                    onValueChange = { input = it },
                     modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
-                    placeholder = { Text("よみを ひらがなで入力") }, singleLine = true,
+                    placeholder = { Text("よみを ひらがなで入力") },
+                    singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = {
-                        val n = normalizeKana(input)
-                        if (n.isNotEmpty()) judge(n in item.accepted, input)
+                        val normalized = normalizeKana(input)
+                        if (normalized.isNotEmpty()) judge(normalized in item.accepted, input)
                     }),
                 )
-                TextButton(onClick = { judge(false, "") }, modifier = Modifier.align(Alignment.End)) {
+                TextButton(
+                    onClick = { judge(false, "") },
+                    modifier = Modifier.align(Alignment.End),
+                ) {
                     Text("パス →")
                 }
             }
         } else {
-            val isLast = (isSurv && lives <= 0) || index + 1 >= items.size
+            val finishesAfterFeedback = when {
+                isSurvival && lives <= 0 -> true
+                isMastery && lastCorrect && masteryQueue.size == 1 -> true
+                !isCycling && !isMastery && index + 1 >= cycleItems.size -> true
+                else -> false
+            }
             Button(onClick = { goNext() }, modifier = Modifier.fillMaxWidth()) {
-                Text(if (isLast) "結果を見る" else "次へ")
+                Text(if (finishesAfterFeedback) "結果を見る" else "次へ")
             }
             Spacer(Modifier.height(8.dp))
         }
@@ -1092,63 +1647,141 @@ private fun FlashcardScreen(items: List<Pair<String, String>>, secDeci: Int, onD
 
 @Composable
 private fun ResultScreen(
-    logs: List<AnswerLog>, score: Int, countLabel: String, missedCount: Int,
-    onRetry: () -> Unit, onRetryMissed: () -> Unit, onDecks: () -> Unit,
+    logs: List<AnswerLog>,
+    score: Int,
+    gameMode: GameMode,
+    maxCombo: Int,
+    durationSec: Int,
+    historyRecorded: Boolean,
+    masteredCount: Int,
+    missedCount: Int,
+    onRetry: () -> Unit,
+    onRetryMissed: () -> Unit,
+    onDecks: () -> Unit,
 ) {
     BackHandler { onDecks() }
     val total = logs.size
     val correct = logs.count { it.correct }
     val rate = if (total == 0) 0 else correct * 100 / total
     val rank = when {
-        rate == 100 -> "S"; rate >= 80 -> "A"; rate >= 60 -> "B"; rate >= 40 -> "C"; else -> "D"
+        rate == 100 -> "S"
+        rate >= 80 -> "A"
+        rate >= 60 -> "B"
+        rate >= 40 -> "C"
+        else -> "D"
     }
     val rankColor = when (rank) {
-        "S" -> ComboOrange; "A" -> CorrectGreen
-        "B" -> MaterialTheme.colorScheme.primary; else -> MaterialTheme.colorScheme.onSurfaceVariant
+        "S" -> ComboOrange
+        "A" -> CorrectGreen
+        "B" -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
-    val missed = logs.filter { !it.correct }
+    val missed = logs.filter { !it.correct }.distinctBy { it.item.noteId }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(12.dp))
+        Text(gameModeLabel(gameMode), fontSize = 16.sp, fontWeight = FontWeight.Bold)
         Text(rank, fontSize = 88.sp, fontWeight = FontWeight.Bold, color = rankColor)
         Text("SCORE $score", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Text("正解 $correct / $total（$rate%）", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(24.dp))
+        Text(
+            "正解 $correct / $total（$rate%）",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            "最大コンボ $maxCombo　プレイ時間 ${durationSec}秒",
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
+        if (!historyRecorded) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                if (gameMode == GameMode.DAILY && total > 0) {
+                    "今日の正式記録はすでに保存済みのため、今回は履歴に追加していません。"
+                } else {
+                    "回答がなかったため、今回は履歴に追加していません。"
+                },
+                fontSize = 12.sp,
+                color = ComboOrange,
+                textAlign = TextAlign.Center,
+            )
+        }
+
+        if (gameMode == GameMode.WEAK_CHALLENGE && masteredCount > 0) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "苦手語を${masteredCount}語克服しました。",
+                color = CorrectGreen,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        if (gameMode == GameMode.MASTERY) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "すべての語を正解するまで復習しました。",
+                color = CorrectGreen,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+
+        Spacer(Modifier.height(24.dp))
         if (missed.isEmpty()) {
             Text("全問正解！🎉", fontSize = 18.sp)
         } else {
-            Text("復習しておきたい語", fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.Start))
+            Text(
+                if (gameMode == GameMode.MASTERY) "途中で間違えた語" else "復習しておきたい語",
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(Alignment.Start),
+            )
             Spacer(Modifier.height(8.dp))
             missed.forEach { log ->
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Text(log.item.question.replace("\n", " "), fontWeight = FontWeight.Bold,
-                        modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Text(log.item.displayAnswer.replace("\n", " "),
+                    Text(
+                        log.item.question.replace("\n", " "),
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        log.item.displayAnswer.replace("\n", " "),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.End, modifier = Modifier.weight(1f),
-                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }
 
         Spacer(Modifier.height(28.dp))
-        if (missedCount > 0) {
+        if (missedCount > 0 && gameMode != GameMode.MASTERY) {
             Button(onClick = onRetryMissed, modifier = Modifier.fillMaxWidth()) {
-                Text("間違いだけ復習（${missedCount}問）")
+                Text("定着するまで復習（${missedCount}語）")
             }
             Spacer(Modifier.height(8.dp))
         }
         OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
-            Text("もう一回（べつの$countLabel）")
+            Text(
+                when (gameMode) {
+                    GameMode.DAILY -> "今日の問題をもう一回"
+                    GameMode.MASTERY -> "同じ語をもう一回"
+                    GameMode.WEAK_CHALLENGE -> "苦手語チャレンジをもう一回"
+                    else -> "同じゲーム形式でもう一回"
+                }
+            )
         }
         Spacer(Modifier.height(8.dp))
-        OutlinedButton(onClick = onDecks, modifier = Modifier.fillMaxWidth()) { Text("デッキを選び直す") }
+        OutlinedButton(onClick = onDecks, modifier = Modifier.fillMaxWidth()) {
+            Text("デッキを選び直す")
+        }
     }
 }
+
