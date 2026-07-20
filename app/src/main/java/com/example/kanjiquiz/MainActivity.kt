@@ -452,7 +452,7 @@ private fun App() {
     var pendingWebExport by remember { mutableStateOf<String?>(null) }
     var webExportMessage by remember { mutableStateOf<String?>(null) }
     val webExportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json")
+        ActivityResultContracts.CreateDocument("text/plain")
     ) { uri ->
         if (uri != null) {
             runCatching {
@@ -461,7 +461,7 @@ private fun App() {
                     ?: error("保存先を開けませんでした。")
                 output.bufferedWriter(Charsets.UTF_8).use { it.write(content) }
             }.onSuccess {
-                webExportMessage = "Web版用JSONを保存しました。Firefox版でこのファイルを読み込んでください。"
+                webExportMessage = "Web版用JSON（.txt）を保存しました。Firefox版でこのファイルを読み込んでください。"
             }.onFailure {
                 webExportMessage = "保存に失敗しました: ${it.message}"
             }
@@ -740,7 +740,7 @@ private fun App() {
                 onExportWeb = {
                     pendingWebExport = buildWebDeckJson(deckName, notes)
                     webExportMessage = null
-                    webExportLauncher.launch("${safeFileName(deckName)}.kanjiquiz.json")
+                    webExportLauncher.launch("${safeFileName(deckName)}.kanjiquiz.json.txt")
                 },
                 onStart = {
                     if (qFields.isEmpty() || aFields.isEmpty()) {
