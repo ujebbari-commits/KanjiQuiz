@@ -29,6 +29,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -51,6 +52,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -92,11 +94,13 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
+private const val APP_VERSION = "1.1"
+private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
 //  設定（端末に保存）
 // ============================================================
-enum class GameMode { NORMAL, SURVIVAL, TIME_ATTACK, MASTERY, WEAK_CHALLENGE, DAILY }
+enum class GameMode { NORMAL, SURVIVAL, TIME_ATTACK, THREE_CORRECT, MASTERY, WEAK_CHALLENGE, DAILY }
 enum class Mode { QUIZ, FLASHCARD }
 
 data class Settings(
@@ -285,6 +289,7 @@ private fun gameModeLabel(mode: GameMode): String = when (mode) {
     GameMode.NORMAL -> "通常"
     GameMode.SURVIVAL -> "サバイバル"
     GameMode.TIME_ATTACK -> "タイムアタック"
+    GameMode.THREE_CORRECT -> "3回正解"
     GameMode.MASTERY -> "定着復習"
     GameMode.WEAK_CHALLENGE -> "苦手語チャレンジ"
     GameMode.DAILY -> "デイリーチャレンジ"
@@ -472,6 +477,10 @@ private fun App() {
             }
             GameMode.SURVIVAL, GameMode.TIME_ATTACK -> {
                 if (settings.weakPriority) weightedOrder(usable) else usable.shuffled()
+            }
+            GameMode.THREE_CORRECT -> {
+                val ordered = if (settings.weakPriority) weightedOrder(usable) else usable.shuffled()
+                if (settings.count < 0) ordered else ordered.take(settings.count)
             }
             GameMode.WEAK_CHALLENGE -> {
                 val stats = store.loadCardStats()
@@ -781,7 +790,7 @@ private fun PermissionScreen(onRequest: () -> Unit) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("漢字クイズ", fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Text("漢字クイズ v$APP_VERSION", fontSize = 28.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(12.dp))
         Text("AnkiDroidのデッキを読み込んでクイズを出題します。\n読み取りのみで、復習スケジュールには影響しません。",
             textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -803,7 +812,11 @@ private fun DeckScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column {
-                Text("デッキを選ぶ", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("デッキを選ぶ", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(8.dp))
+                    Text("v$APP_VERSION", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 if (streak > 0) Text("🔥 $streak 日連続", fontSize = 13.sp, color = ComboOrange)
             }
             Row {
@@ -983,6 +996,7 @@ private fun HistoryScreen(entries: List<HistoryEntry>, onClear: () -> Unit, onBa
                                         GameMode.NORMAL,
                                         GameMode.SURVIVAL,
                                         GameMode.TIME_ATTACK,
+                                        GameMode.THREE_CORRECT,
                                     )
                                 ) "・苦手優先" else ""
                                 Text(
@@ -1087,6 +1101,7 @@ private fun FieldScreen(
                     "通常" to GameMode.NORMAL,
                     "サバイバル" to GameMode.SURVIVAL,
                     "タイムアタック" to GameMode.TIME_ATTACK,
+                    "3回正解" to GameMode.THREE_CORRECT,
                     "苦手語" to GameMode.WEAK_CHALLENGE,
                     "デイリー" to GameMode.DAILY,
                 ),
@@ -1098,6 +1113,7 @@ private fun FieldScreen(
                     GameMode.NORMAL -> "設定した問題数を解きます。"
                     GameMode.SURVIVAL -> "3回間違えるまで、問題を繰り返し出題します。"
                     GameMode.TIME_ATTACK -> "60秒が終わるまで出題します。正解で時間が増えます。"
+                    GameMode.THREE_CORRECT -> "各カードを合計3回正解すると出題対象から外れます。全カード達成まで続きます。"
                     GameMode.WEAK_CHALLENGE -> "苦手度が高い語を最大10語出題します。"
                     GameMode.DAILY -> "今日固定の10問です。正式記録は1日1回です。"
                     GameMode.MASTERY -> "間違えた語を全て正解するまで繰り返します。"
@@ -1124,6 +1140,7 @@ private fun FieldScreen(
                     GameMode.NORMAL,
                     GameMode.SURVIVAL,
                     GameMode.TIME_ATTACK,
+                    GameMode.THREE_CORRECT,
                 )
             ) {
                 Row(
@@ -1202,6 +1219,7 @@ private fun QuizScreen(
     val isTimeAttack = config.gameMode == GameMode.TIME_ATTACK
     val isSurvival = config.gameMode == GameMode.SURVIVAL
     val isMastery = config.gameMode == GameMode.MASTERY
+    val isThreeCorrect = config.gameMode == GameMode.THREE_CORRECT
     val isCycling = isTimeAttack || isSurvival
     val perQuestionTimer = !isTimeAttack && config.timeLimitSec > 0
     val limit = config.timeLimitSec.toFloat()
@@ -1210,6 +1228,10 @@ private fun QuizScreen(
     val masteryQueue = remember {
         mutableStateListOf<QuizItem>().apply { addAll(baseItems.shuffled()) }
     }
+    val threeCorrectQueue = remember {
+        mutableStateListOf<QuizItem>().apply { addAll(baseItems.shuffled()) }
+    }
+    val threeCorrectCounts = remember { mutableStateMapOf<Long, Int>() }
     var index by remember { mutableIntStateOf(0) }
     var questionSerial by remember { mutableIntStateOf(0) }
     var input by remember { mutableStateOf("") }
@@ -1229,7 +1251,11 @@ private fun QuizScreen(
     val focusRequester = remember { FocusRequester() }
     val startedAt = remember { System.currentTimeMillis() }
 
-    val item = if (isMastery) masteryQueue.first() else cycleItems[index]
+    val item = when {
+        isMastery -> masteryQueue.first()
+        isThreeCorrect -> threeCorrectQueue.first()
+        else -> cycleItems[index]
+    }
     val promptText = if (reverse) item.displayAnswer else item.question
     val answerText = if (reverse) item.question else item.displayAnswer
     val choices = remember(questionSerial, item.noteId) {
@@ -1289,6 +1315,18 @@ private fun QuizScreen(
             return
         }
 
+        if (isThreeCorrect) {
+            val currentCorrect = threeCorrectCounts[item.noteId] ?: 0
+            if (currentCorrect >= THREE_CORRECT_TARGET && threeCorrectQueue.size == 1) {
+                finish()
+                return
+            }
+            val answered = threeCorrectQueue.removeAt(0)
+            if (currentCorrect < THREE_CORRECT_TARGET) threeCorrectQueue.add(answered)
+            resetForNextQuestion()
+            return
+        }
+
         if (index + 1 < cycleItems.size) {
             index++
             resetForNextQuestion()
@@ -1316,6 +1354,10 @@ private fun QuizScreen(
             }
             lastGained = 50 + speed + (combo - 1) * 5
             score += lastGained
+            if (isThreeCorrect) {
+                val current = threeCorrectCounts[item.noteId] ?: 0
+                threeCorrectCounts[item.noteId] = (current + 1).coerceAtMost(THREE_CORRECT_TARGET)
+            }
             if (isTimeAttack) {
                 val comboTimeBonus = if (combo % 5 == 0) 2 else 0
                 lastTimeBonus = 1 + comboTimeBonus
@@ -1404,6 +1446,10 @@ private fun QuizScreen(
                     "残り ${masteryQueue.size}語",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                isThreeCorrect -> Text(
+                    "残り ${threeCorrectQueue.size}語・達成 ${threeCorrectCounts.values.sum()}/${baseItems.size * THREE_CORRECT_TARGET}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 else -> Text(
                     "${index + 1} / ${cycleItems.size}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1437,13 +1483,15 @@ private fun QuizScreen(
 
         Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             if (phase == Phase.ASKING) {
-                Text(
-                    promptText,
-                    fontSize = 44.sp,
-                    lineHeight = 56.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center,
-                )
+                SelectionContainer {
+                    Text(
+                        promptText,
+                        fontSize = 44.sp,
+                        lineHeight = 56.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             } else {
                 val userInput = logs.lastOrNull()?.input ?: ""
                 Column(
@@ -1461,25 +1509,44 @@ private fun QuizScreen(
                         color = if (lastCorrect) CorrectGreen else WrongRed,
                     )
                     Spacer(Modifier.height(14.dp))
-                    Text(
-                        promptText,
-                        fontSize = 30.sp,
-                        lineHeight = 40.sp,
-                        fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center,
-                    )
+                    SelectionContainer {
+                        Text(
+                            promptText,
+                            fontSize = 30.sp,
+                            lineHeight = 40.sp,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
                     Spacer(Modifier.height(6.dp))
-                    Text(
-                        answerText,
-                        fontSize = 22.sp,
-                        lineHeight = 30.sp,
-                        textAlign = TextAlign.Center,
-                        fontWeight = FontWeight.Bold,
-                        color = CorrectGreen,
-                    )
+                    SelectionContainer {
+                        Text(
+                            answerText,
+                            fontSize = 22.sp,
+                            lineHeight = 30.sp,
+                            textAlign = TextAlign.Center,
+                            fontWeight = FontWeight.Bold,
+                            color = CorrectGreen,
+                        )
+                    }
                     if (!lastCorrect && userInput.isNotEmpty()) {
                         Spacer(Modifier.height(6.dp))
                         Text("あなたの解答：$userInput", fontSize = 14.sp, color = WrongRed)
+                    }
+                    if (isThreeCorrect) {
+                        Spacer(Modifier.height(6.dp))
+                        val currentCorrect = threeCorrectCounts[item.noteId] ?: 0
+                        Text(
+                            if (currentCorrect >= THREE_CORRECT_TARGET) {
+                                "このカードは3回正解：卒業"
+                            } else {
+                                "このカードの正解回数 $currentCorrect/$THREE_CORRECT_TARGET"
+                            },
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (currentCorrect >= THREE_CORRECT_TARGET) CorrectGreen
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     if (lastCorrect) {
                         Spacer(Modifier.height(6.dp))
@@ -1547,7 +1614,10 @@ private fun QuizScreen(
             val finishesAfterFeedback = when {
                 isSurvival && lives <= 0 -> true
                 isMastery && lastCorrect && masteryQueue.size == 1 -> true
-                !isCycling && !isMastery && index + 1 >= cycleItems.size -> true
+                isThreeCorrect && lastCorrect &&
+                    (threeCorrectCounts[item.noteId] ?: 0) >= THREE_CORRECT_TARGET &&
+                    threeCorrectQueue.size == 1 -> true
+                !isCycling && !isMastery && !isThreeCorrect && index + 1 >= cycleItems.size -> true
                 else -> false
             }
             Button(onClick = { goNext() }, modifier = Modifier.fillMaxWidth()) {
@@ -1615,13 +1685,17 @@ private fun FlashcardScreen(items: List<Pair<String, String>>, secDeci: Int, onD
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.verticalScroll(rememberScrollState())) {
-                Text(front, fontSize = 40.sp, lineHeight = 52.sp,
-                    fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                SelectionContainer {
+                    Text(front, fontSize = 40.sp, lineHeight = 52.sp,
+                        fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                }
                 Spacer(Modifier.height(16.dp))
                 HorizontalDivider(modifier = Modifier.fillMaxWidth().padding(horizontal = 40.dp))
                 Spacer(Modifier.height(16.dp))
-                Text(back, fontSize = 24.sp, lineHeight = 34.sp, textAlign = TextAlign.Center,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectionContainer {
+                    Text(back, fontSize = 24.sp, lineHeight = 34.sp, textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 if (paused) {
                     Spacer(Modifier.height(16.dp))
                     Text("⏸ 一時停止中（タップで再開）", fontSize = 13.sp, color = ComboOrange)
@@ -1722,6 +1796,14 @@ private fun ResultScreen(
             Spacer(Modifier.height(8.dp))
             Text(
                 "すべての語を正解するまで復習しました。",
+                color = CorrectGreen,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        if (gameMode == GameMode.THREE_CORRECT) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "すべてのカードで3回正解しました。",
                 color = CorrectGreen,
                 fontWeight = FontWeight.Bold,
             )
