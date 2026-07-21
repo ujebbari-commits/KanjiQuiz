@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.3";
+const APP_VERSION = "0.1.4";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -137,6 +137,25 @@ function gameFontStyle(value) {
 
 function applyGameFontStyle(element, value) {
   if (element) element.style.cssText += `;${gameFontStyle(value)}`;
+}
+
+function setQuizKeyboardLayout(active) {
+  const shell = document.querySelector(".quiz-shell");
+  document.body.classList.toggle("quiz-keyboard-active", Boolean(active));
+  if (!shell) return;
+  shell.classList.toggle("keyboard-active", Boolean(active));
+  if (active) {
+    const height = Math.round(window.visualViewport?.height || window.innerHeight);
+    shell.style.setProperty("--quiz-viewport-height", `${height}px`);
+    requestAnimationFrame(() => window.scrollTo(0, 0));
+  } else {
+    shell.style.removeProperty("--quiz-viewport-height");
+  }
+}
+
+function refreshQuizKeyboardLayout() {
+  const input = document.getElementById("answer-input");
+  setQuizKeyboardLayout(Boolean(input && document.activeElement === input));
 }
 
 function loadHistory() {
@@ -651,6 +670,7 @@ function backButton(target = "home", label = "戻る") {
 
 function navigate(screen, options = {}) {
   const push = options.push !== false;
+  if (screen !== "quiz") setQuizKeyboardLayout(false);
   state.screen = screen;
   if (push) history.pushState({ screen }, "", location.href);
   render();
@@ -1429,6 +1449,7 @@ function renderQuiz() {
 
 function renderQuizQuestion(session) {
   if (state.screen !== "quiz" || session.ended) return;
+  setQuizKeyboardLayout(false);
   updateQuizHeaderUi(session);
   const main = document.getElementById("quiz-main");
   const controls = document.getElementById("quiz-controls");
@@ -1458,6 +1479,11 @@ function renderQuizQuestion(session) {
       session.judge(session.item.accepted.includes(normalized), input.value);
     };
     document.getElementById("submit-answer").addEventListener("click", submit);
+    input.addEventListener("focus", () => {
+      setQuizKeyboardLayout(true);
+      setTimeout(() => window.scrollTo(0, 0), 80);
+    });
+    input.addEventListener("blur", () => setQuizKeyboardLayout(false));
     input.addEventListener("keydown", event => {
       if (event.key === "Enter") {
         event.preventDefault();
@@ -1479,6 +1505,7 @@ function installSelectionPause(session) {
 
 function renderQuizFeedback(session) {
   if (state.screen !== "quiz" || session.ended) return;
+  setQuizKeyboardLayout(false);
   updateQuizHeaderUi(session);
   const log = session.logs.at(-1);
   const title = session.lastCorrect ? "⭕ 正解！" : log.input ? "❌ 不正解" : "⏰ 時間切れ・パス";
@@ -2049,6 +2076,10 @@ window.addEventListener("beforeunload", event => {
     event.preventDefault();
     event.returnValue = "";
   }
+});
+
+window.visualViewport?.addEventListener("resize", () => {
+  if (state.screen === "quiz") refreshQuizKeyboardLayout();
 });
 
 window.addEventListener("resize", () => {

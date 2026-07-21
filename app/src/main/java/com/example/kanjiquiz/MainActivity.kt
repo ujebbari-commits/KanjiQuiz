@@ -61,6 +61,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -95,7 +96,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.5"
+private const val APP_VERSION = "1.6"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -1603,6 +1604,9 @@ private fun QuizScreen(
     var remaining by remember { mutableFloatStateOf(limit) }
     var globalRemaining by remember { mutableFloatStateOf(TIME_ATTACK_SEC) }
     var phase by remember { mutableStateOf(Phase.ASKING) }
+    var answerFieldFocused by remember { mutableStateOf(false) }
+    val keyboardVisible = answerFieldFocused && !reverse && phase == Phase.ASKING
+    val questionScrollState = rememberScrollState()
     var lastCorrect by remember { mutableStateOf(false) }
     var lastGained by remember { mutableIntStateOf(0) }
     var lastTimeBonus by remember { mutableIntStateOf(0) }
@@ -1829,7 +1833,11 @@ private fun QuizScreen(
         )
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp, vertical = if (keyboardVisible) 8.dp else 20.dp),
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1864,56 +1872,73 @@ private fun QuizScreen(
                 TextButton(onClick = { showConfirm = true }) { Text("やめる") }
             }
         }
-        Text(
-            if (combo >= 2) "🔥 $combo COMBO" else "",
-            color = ComboOrange,
-            fontWeight = FontWeight.Bold,
-            fontSize = 14.sp,
-        )
-        if (phase == Phase.ASKING && maxAttempts > 1) {
+        if (!keyboardVisible) {
             Text(
-                "挑戦 $attemptNumber / $maxAttempts",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 13.sp,
-            )
-        }
-        retryNotice?.let { notice ->
-            Text(
-                notice,
-                color = WrongRed,
-                fontSize = 14.sp,
+                if (combo >= 2) "🔥 $combo COMBO" else "",
+                color = ComboOrange,
                 fontWeight = FontWeight.Bold,
+                fontSize = 14.sp,
             )
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(onClick = { changeGameFontSize(-4) }, enabled = gameFontSizeSp > 16) {
-                Text("A−")
+            if (phase == Phase.ASKING && maxAttempts > 1) {
+                Text(
+                    "挑戦 $attemptNumber / $maxAttempts",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 13.sp,
+                )
             }
-            Text("${gameFontSizeSp}sp", fontSize = 12.sp)
-            TextButton(onClick = { changeGameFontSize(4) }, enabled = gameFontSizeSp < 96) {
-                Text("A＋")
+            retryNotice?.let { notice ->
+                Text(
+                    notice,
+                    color = WrongRed,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                )
             }
-        }
-        Spacer(Modifier.height(4.dp))
-        when {
-            isTimeAttack -> LinearProgressIndicator(
-                progress = { (globalRemaining / TIME_ATTACK_SEC).coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth().height(8.dp),
-                color = if (globalRemaining < 10f) WrongRed else MaterialTheme.colorScheme.primary,
-            )
-            perQuestionTimer -> LinearProgressIndicator(
-                progress = { (remaining / limit).coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth().height(8.dp),
-                color = if (remaining < limit * 0.3f) WrongRed
-                else MaterialTheme.colorScheme.primary,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = { changeGameFontSize(-4) }, enabled = gameFontSizeSp > 16) {
+                    Text("A−")
+                }
+                Text("${gameFontSizeSp}sp", fontSize = 12.sp)
+                TextButton(onClick = { changeGameFontSize(4) }, enabled = gameFontSizeSp < 96) {
+                    Text("A＋")
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            when {
+                isTimeAttack -> LinearProgressIndicator(
+                    progress = { (globalRemaining / TIME_ATTACK_SEC).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(8.dp),
+                    color = if (globalRemaining < 10f) WrongRed else MaterialTheme.colorScheme.primary,
+                )
+                perQuestionTimer -> LinearProgressIndicator(
+                    progress = { (remaining / limit).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(8.dp),
+                    color = if (remaining < limit * 0.3f) WrongRed
+                    else MaterialTheme.colorScheme.primary,
+                )
+            }
+        } else {
+            retryNotice?.let { notice ->
+                Text(
+                    notice,
+                    color = WrongRed,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
         }
 
-        Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .then(if (keyboardVisible) Modifier.verticalScroll(questionScrollState) else Modifier),
+            contentAlignment = Alignment.Center,
+        ) {
             if (phase == Phase.ASKING) {
                 SelectionContainer {
                     Text(
@@ -2037,7 +2062,10 @@ private fun QuizScreen(
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
-                    modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { answerFieldFocused = it.isFocused }
+                        .focusRequester(focusRequester),
                     placeholder = { Text("よみを ひらがなで入力") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
@@ -2046,11 +2074,13 @@ private fun QuizScreen(
                         if (normalized.isNotEmpty()) judge(normalized in item.accepted, input)
                     }),
                 )
-                TextButton(
-                    onClick = { judge(false, "") },
-                    modifier = Modifier.align(Alignment.End),
-                ) {
-                    Text("パス →")
+                if (!keyboardVisible) {
+                    TextButton(
+                        onClick = { judge(false, "") },
+                        modifier = Modifier.align(Alignment.End),
+                    ) {
+                        Text("パス →")
+                    }
                 }
             }
         } else {

@@ -220,3 +220,46 @@ th { background: var(--surface-2); }
 
 .font-step { min-width: 44px; padding-inline: 10px; }
 .font-controls { justify-content: flex-end; gap: 4px; }
+
+/* Firefox/Androidでソフトキーボードを開いたときも問題文と回答欄を同時に表示する。 */
+body.quiz-keyboard-active {
+  overflow: hidden;
+}
+.quiz-shell.keyboard-active {
+  min-height: var(--quiz-viewport-height, 100dvh);
+  height: var(--quiz-viewport-height, 100dvh);
+  max-height: var(--quiz-viewport-height, 100dvh);
+  padding: max(6px, env(safe-area-inset-top)) 10px max(6px, env(safe-area-inset-bottom));
+  gap: 4px;
+  overflow: hidden;
+}
+.quiz-shell.keyboard-active .quiz-header {
+  flex: 0 0 auto;
+  align-items: center;
+  font-size: .86rem;
+}
+.quiz-shell.keyboard-active .quiz-header > div:first-child > :not(#quiz-status),
+.quiz-shell.keyboard-active .font-controls > :not(#quiz-score) {
+  display: none;
+}
+.quiz-shell.keyboard-active #quiz-progress {
+  display: none;
+}
+.quiz-shell.keyboard-active .prompt-area {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 4px 2px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.quiz-shell.keyboard-active .answer-controls {
+  flex: 0 0 auto;
+  gap: 4px;
+}
+.quiz-shell.keyboard-active .answer-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+.quiz-shell.keyboard-active #pass-question {
+  display: none;
+}
