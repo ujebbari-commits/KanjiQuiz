@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -61,11 +63,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -96,7 +98,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.6"
+private const val APP_VERSION = "1.7"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -1604,8 +1606,7 @@ private fun QuizScreen(
     var remaining by remember { mutableFloatStateOf(limit) }
     var globalRemaining by remember { mutableFloatStateOf(TIME_ATTACK_SEC) }
     var phase by remember { mutableStateOf(Phase.ASKING) }
-    var answerFieldFocused by remember { mutableStateOf(false) }
-    val keyboardVisible = answerFieldFocused && !reverse && phase == Phase.ASKING
+    val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0 && !reverse && phase == Phase.ASKING
     val questionScrollState = rememberScrollState()
     var lastCorrect by remember { mutableStateOf(false) }
     var lastGained by remember { mutableIntStateOf(0) }
@@ -1872,33 +1873,37 @@ private fun QuizScreen(
                 TextButton(onClick = { showConfirm = true }) { Text("やめる") }
             }
         }
-        if (!keyboardVisible) {
-            Text(
-                if (combo >= 2) "🔥 $combo COMBO" else "",
-                color = ComboOrange,
-                fontWeight = FontWeight.Bold,
-                fontSize = 14.sp,
-            )
-            if (phase == Phase.ASKING && maxAttempts > 1) {
-                Text(
-                    "挑戦 $attemptNumber / $maxAttempts",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 13.sp,
-                )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                if (combo >= 2) {
+                    Text(
+                        "🔥 $combo COMBO",
+                        color = ComboOrange,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = if (keyboardVisible) 12.sp else 14.sp,
+                    )
+                }
+                if (phase == Phase.ASKING && maxAttempts > 1) {
+                    Text(
+                        "挑戦 $attemptNumber / $maxAttempts",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = if (keyboardVisible) 11.sp else 13.sp,
+                    )
+                }
+                retryNotice?.let { notice ->
+                    Text(
+                        notice,
+                        color = WrongRed,
+                        fontSize = if (keyboardVisible) 12.sp else 14.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
-            retryNotice?.let { notice ->
-                Text(
-                    notice,
-                    color = WrongRed,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = { changeGameFontSize(-4) }, enabled = gameFontSizeSp > 16) {
                     Text("A−")
                 }
@@ -1907,29 +1912,20 @@ private fun QuizScreen(
                     Text("A＋")
                 }
             }
-            Spacer(Modifier.height(4.dp))
-            when {
-                isTimeAttack -> LinearProgressIndicator(
-                    progress = { (globalRemaining / TIME_ATTACK_SEC).coerceIn(0f, 1f) },
-                    modifier = Modifier.fillMaxWidth().height(8.dp),
-                    color = if (globalRemaining < 10f) WrongRed else MaterialTheme.colorScheme.primary,
-                )
-                perQuestionTimer -> LinearProgressIndicator(
-                    progress = { (remaining / limit).coerceIn(0f, 1f) },
-                    modifier = Modifier.fillMaxWidth().height(8.dp),
-                    color = if (remaining < limit * 0.3f) WrongRed
-                    else MaterialTheme.colorScheme.primary,
-                )
-            }
-        } else {
-            retryNotice?.let { notice ->
-                Text(
-                    notice,
-                    color = WrongRed,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
+        }
+        if (!keyboardVisible) Spacer(Modifier.height(4.dp))
+        when {
+            isTimeAttack -> LinearProgressIndicator(
+                progress = { (globalRemaining / TIME_ATTACK_SEC).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(if (keyboardVisible) 5.dp else 8.dp),
+                color = if (globalRemaining < 10f) WrongRed else MaterialTheme.colorScheme.primary,
+            )
+            perQuestionTimer -> LinearProgressIndicator(
+                progress = { (remaining / limit).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(if (keyboardVisible) 5.dp else 8.dp),
+                color = if (remaining < limit * 0.3f) WrongRed
+                else MaterialTheme.colorScheme.primary,
+            )
         }
 
         Box(
@@ -2064,7 +2060,6 @@ private fun QuizScreen(
                     onValueChange = { input = it },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .onFocusChanged { answerFieldFocused = it.isFocused }
                         .focusRequester(focusRequester),
                     placeholder = { Text("よみを ひらがなで入力") },
                     singleLine = true,
@@ -2074,13 +2069,11 @@ private fun QuizScreen(
                         if (normalized.isNotEmpty()) judge(normalized in item.accepted, input)
                     }),
                 )
-                if (!keyboardVisible) {
-                    TextButton(
-                        onClick = { judge(false, "") },
-                        modifier = Modifier.align(Alignment.End),
-                    ) {
-                        Text("パス →")
-                    }
+                TextButton(
+                    onClick = { judge(false, "") },
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    Text("パス →")
                 }
             }
         } else {

@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.4";
+const APP_VERSION = "0.1.5";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -139,14 +139,20 @@ function applyGameFontStyle(element, value) {
   if (element) element.style.cssText += `;${gameFontStyle(value)}`;
 }
 
+let quizViewportBaseline = 0;
+let quizInputFocused = false;
+
+function currentQuizViewportHeight() {
+  return Math.round(window.visualViewport?.height || window.innerHeight);
+}
+
 function setQuizKeyboardLayout(active) {
   const shell = document.querySelector(".quiz-shell");
   document.body.classList.toggle("quiz-keyboard-active", Boolean(active));
   if (!shell) return;
   shell.classList.toggle("keyboard-active", Boolean(active));
   if (active) {
-    const height = Math.round(window.visualViewport?.height || window.innerHeight);
-    shell.style.setProperty("--quiz-viewport-height", `${height}px`);
+    shell.style.setProperty("--quiz-viewport-height", `${currentQuizViewportHeight()}px`);
     requestAnimationFrame(() => window.scrollTo(0, 0));
   } else {
     shell.style.removeProperty("--quiz-viewport-height");
@@ -155,7 +161,16 @@ function setQuizKeyboardLayout(active) {
 
 function refreshQuizKeyboardLayout() {
   const input = document.getElementById("answer-input");
-  setQuizKeyboardLayout(Boolean(input && document.activeElement === input));
+  const focused = Boolean(input && document.activeElement === input && quizInputFocused);
+  const height = currentQuizViewportHeight();
+  if (!focused) {
+    quizViewportBaseline = Math.max(quizViewportBaseline, height);
+    setQuizKeyboardLayout(false);
+    return;
+  }
+  if (!quizViewportBaseline) quizViewportBaseline = height;
+  const keyboardOpen = quizViewportBaseline - height >= 100;
+  setQuizKeyboardLayout(keyboardOpen);
 }
 
 function loadHistory() {
@@ -670,7 +685,11 @@ function backButton(target = "home", label = "戻る") {
 
 function navigate(screen, options = {}) {
   const push = options.push !== false;
-  if (screen !== "quiz") setQuizKeyboardLayout(false);
+  if (screen !== "quiz") {
+    quizInputFocused = false;
+    quizViewportBaseline = 0;
+    setQuizKeyboardLayout(false);
+  }
   state.screen = screen;
   if (push) history.pushState({ screen }, "", location.href);
   render();
@@ -1449,6 +1468,8 @@ function renderQuiz() {
 
 function renderQuizQuestion(session) {
   if (state.screen !== "quiz" || session.ended) return;
+  quizInputFocused = false;
+  quizViewportBaseline = Math.max(quizViewportBaseline, currentQuizViewportHeight());
   setQuizKeyboardLayout(false);
   updateQuizHeaderUi(session);
   const main = document.getElementById("quiz-main");
@@ -1480,10 +1501,15 @@ function renderQuizQuestion(session) {
     };
     document.getElementById("submit-answer").addEventListener("click", submit);
     input.addEventListener("focus", () => {
-      setQuizKeyboardLayout(true);
-      setTimeout(() => window.scrollTo(0, 0), 80);
+      quizInputFocused = true;
+      quizViewportBaseline = Math.max(quizViewportBaseline, currentQuizViewportHeight());
+      setTimeout(refreshQuizKeyboardLayout, 80);
+      setTimeout(refreshQuizKeyboardLayout, 300);
     });
-    input.addEventListener("blur", () => setQuizKeyboardLayout(false));
+    input.addEventListener("blur", () => {
+      quizInputFocused = false;
+      refreshQuizKeyboardLayout();
+    });
     input.addEventListener("keydown", event => {
       if (event.key === "Enter") {
         event.preventDefault();
@@ -1505,6 +1531,7 @@ function installSelectionPause(session) {
 
 function renderQuizFeedback(session) {
   if (state.screen !== "quiz" || session.ended) return;
+  quizInputFocused = false;
   setQuizKeyboardLayout(false);
   updateQuizHeaderUi(session);
   const log = session.logs.at(-1);
@@ -2083,6 +2110,7 @@ window.visualViewport?.addEventListener("resize", () => {
 });
 
 window.addEventListener("resize", () => {
+  if (state.screen === "quiz") refreshQuizKeyboardLayout();
   if (state.screen === "history") {
     const filters = ["history-deck", "history-mode", "history-reverse"];
     if (filters.every(id => document.getElementById(id))) document.getElementById("history-deck").dispatchEvent(new Event("change"));

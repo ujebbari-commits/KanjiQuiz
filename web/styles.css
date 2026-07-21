@@ -221,7 +221,7 @@ th { background: var(--surface-2); }
 .font-step { min-width: 44px; padding-inline: 10px; }
 .font-controls { justify-content: flex-end; gap: 4px; }
 
-/* Firefox/Androidでソフトキーボードを開いたときも問題文と回答欄を同時に表示する。 */
+/* Firefox/Androidでソフトキーボードを開いたときも、操作UIを隠さずに収める。 */
 body.quiz-keyboard-active {
   overflow: hidden;
 }
@@ -229,37 +229,49 @@ body.quiz-keyboard-active {
   min-height: var(--quiz-viewport-height, 100dvh);
   height: var(--quiz-viewport-height, 100dvh);
   max-height: var(--quiz-viewport-height, 100dvh);
-  padding: max(6px, env(safe-area-inset-top)) 10px max(6px, env(safe-area-inset-bottom));
+  padding: max(4px, env(safe-area-inset-top)) 8px max(4px, env(safe-area-inset-bottom));
   gap: 4px;
   overflow: hidden;
 }
 .quiz-shell.keyboard-active .quiz-header {
   flex: 0 0 auto;
   align-items: center;
-  font-size: .86rem;
+  gap: 4px;
+  font-size: .78rem;
 }
-.quiz-shell.keyboard-active .quiz-header > div:first-child > :not(#quiz-status),
-.quiz-shell.keyboard-active .font-controls > :not(#quiz-score) {
-  display: none;
+.quiz-shell.keyboard-active .quiz-header > div:first-child {
+  min-width: 0;
 }
-.quiz-shell.keyboard-active #quiz-progress {
-  display: none;
+.quiz-shell.keyboard-active .font-controls {
+  gap: 2px;
+}
+.quiz-shell.keyboard-active .font-controls .btn {
+  min-height: 32px;
+  padding: 4px 7px;
+}
+.quiz-shell.keyboard-active .font-step {
+  min-width: 34px;
+}
+.quiz-shell.keyboard-active #quiz-progress .progress {
+  height: 5px;
 }
 .quiz-shell.keyboard-active .prompt-area {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 4px 2px;
+  padding: 3px 2px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 .quiz-shell.keyboard-active .answer-controls {
   flex: 0 0 auto;
-  gap: 4px;
+  gap: 3px;
 }
 .quiz-shell.keyboard-active .answer-row {
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 6px;
+  gap: 5px;
 }
 .quiz-shell.keyboard-active #pass-question {
-  display: none;
+  min-height: 32px;
+  padding-block: 4px;
 }
+
