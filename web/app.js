@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.2";
+const APP_VERSION = "0.1.3";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -28,6 +28,7 @@ const DEFAULT_SETTINGS = {
   gameMode: "NORMAL",
   weakPriority: true,
   maxAttempts: 3,
+  gameFontSize: 44,
   pauseWhileSelecting: true
 };
 
@@ -114,12 +115,28 @@ function loadSettings() {
     ...saved,
     maxAttempts: clampInt(saved.maxAttempts ?? DEFAULT_SETTINGS.maxAttempts, 1, 99),
     feedbackDeci: clampInt(saved.feedbackDeci ?? DEFAULT_SETTINGS.feedbackDeci, 1, 600),
-    flashcardDeci: clampInt(saved.flashcardDeci ?? DEFAULT_SETTINGS.flashcardDeci, 3, 600)
+    flashcardDeci: clampInt(saved.flashcardDeci ?? DEFAULT_SETTINGS.flashcardDeci, 3, 600),
+    gameFontSize: clampInt(saved.gameFontSize ?? DEFAULT_SETTINGS.gameFontSize, 16, 96)
   };
 }
 
 function saveSettings(settings) {
   writeJson("kq.settings", settings);
+}
+
+function gameFontStyle(value) {
+  const size = clampInt(value, 16, 96);
+  return [
+    `--game-font-size:${size}px`,
+    `--game-feedback-question-size:${Math.max(16, Math.round(size * 0.70))}px`,
+    `--game-answer-size:${Math.max(16, Math.round(size * 0.55))}px`,
+    `--game-choice-size:${Math.max(16, Math.min(36, Math.round(size * 0.48)))}px`,
+    `--game-flash-answer-size:${Math.max(16, Math.round(size * 0.60))}px`
+  ].join(";");
+}
+
+function applyGameFontStyle(element, value) {
+  if (element) element.style.cssText += `;${gameFontStyle(value)}`;
 }
 
 function loadHistory() {
@@ -893,6 +910,9 @@ function renderFields() {
           <label><span>正誤表示時間（秒）</span>
             <input class="field" id="feedback-sec" type="number" min="0.1" max="60" step="0.1" value="${settings.feedbackDeci / 10}">
           </label>
+          <label><span>ゲーム画面の文字サイズ（16〜96px）</span>
+            <input class="field" id="game-font-size" type="number" min="16" max="96" value="${settings.gameFontSize}">
+          </label>
         </div>
         <label class="row"><input id="weak-priority" type="checkbox" ${settings.weakPriority ? "checked" : ""}><span>苦手カードを優先</span></label>
         <label class="row"><input id="auto-advance" type="checkbox" ${settings.autoAdvance ? "checked" : ""}><span>正誤表示後に自動で次へ</span></label>
@@ -977,7 +997,7 @@ function renderFields() {
         errorBox.innerHTML = `<div class="error">この組み合わせでは表示できるカードがありません。</div>`;
         return;
       }
-      startFlash(items, nextSettings.flashcardDeci);
+      startFlash(items, nextSettings.flashcardDeci, nextSettings.gameFontSize);
       return;
     }
     const config = createRoundConfig(deck, prefs, nextSettings);
@@ -1029,6 +1049,7 @@ function collectFieldSettings(base) {
     timeLimitSec: clampInt(document.getElementById("time-limit").value, 0, 600),
     maxAttempts: clampInt(document.getElementById("max-attempts").value, 1, 99),
     feedbackDeci: clampInt(Math.round(Number(document.getElementById("feedback-sec").value) * 10), 1, 600),
+    gameFontSize: clampInt(document.getElementById("game-font-size").value, 16, 96),
     weakPriority: document.getElementById("weak-priority").checked,
     autoAdvance: document.getElementById("auto-advance").checked
   };
@@ -1107,6 +1128,7 @@ function createRoundConfig(deck, prefs, settings, options = {}) {
     feedbackDeci: settings.feedbackDeci,
     weakPriority: settings.weakPriority,
     maxAttempts: settings.maxAttempts,
+    gameFontSize: settings.gameFontSize,
     pauseWhileSelecting: settings.pauseWhileSelecting,
     choicePool: pool,
     dailyKey: gameMode === "DAILY" ? makeDailyKey(deck, prefs.qFields, prefs.aFields, reverse) : null,
@@ -1363,7 +1385,7 @@ function renderQuiz() {
   const session = state.quiz;
   if (!session || session.ended) return navigate("home", { push: false });
   app.innerHTML = `
-    <main class="app-shell quiz-shell">
+    <main class="app-shell quiz-shell" style="${gameFontStyle(session.config.gameFontSize)}">
       <div class="quiz-header">
         <div>
           <div id="quiz-status"></div>
@@ -1372,8 +1394,11 @@ function renderQuiz() {
           <div id="quiz-retry" class="retry-notice small"></div>
           <div id="selection-pause" class="subtle small"></div>
         </div>
-        <div class="row">
+        <div class="row row-wrap font-controls">
           <span id="quiz-score" class="score"></span>
+          <button class="btn btn-ghost font-step" id="font-smaller" type="button" aria-label="文字を小さく">A−</button>
+          <span id="font-size-label" class="small">${session.config.gameFontSize}px</span>
+          <button class="btn btn-ghost font-step" id="font-larger" type="button" aria-label="文字を大きく">A＋</button>
           <button class="btn btn-ghost" id="quit-quiz" type="button">やめる</button>
         </div>
       </div>
@@ -1382,6 +1407,21 @@ function renderQuiz() {
       <section class="answer-controls" id="quiz-controls"></section>
     </main>
     <div id="quiz-modal"></div>`;
+  const changeFontSize = delta => {
+    const next = clampInt(session.config.gameFontSize + delta, 16, 96);
+    if (next === session.config.gameFontSize) return;
+    session.config.gameFontSize = next;
+    const settings = loadSettings();
+    saveSettings({ ...settings, gameFontSize: next });
+    applyGameFontStyle(document.querySelector(".quiz-shell"), next);
+    document.getElementById("font-size-label").textContent = `${next}px`;
+    document.getElementById("font-smaller").disabled = next <= 16;
+    document.getElementById("font-larger").disabled = next >= 96;
+  };
+  document.getElementById("font-smaller").addEventListener("click", () => changeFontSize(-4));
+  document.getElementById("font-larger").addEventListener("click", () => changeFontSize(4));
+  document.getElementById("font-smaller").disabled = session.config.gameFontSize <= 16;
+  document.getElementById("font-larger").disabled = session.config.gameFontSize >= 96;
   document.getElementById("quit-quiz").addEventListener("click", () => showQuitQuizModal(session));
   renderQuizQuestion(session);
   session.startTimer();
@@ -1681,13 +1721,14 @@ function renderResult() {
   });
 }
 
-function startFlash(items, secDeci) {
+function startFlash(items, secDeci, gameFontSize) {
   state.flash?.stop();
   state.flash = {
     items,
     index: 0,
     paused: false,
     secDeci,
+    gameFontSize: clampInt(gameFontSize, 16, 96),
     timerId: null,
     remainingMs: secDeci * 100,
     lastTick: performance.now(),
@@ -1703,10 +1744,15 @@ function renderFlash() {
   const flash = state.flash;
   if (!flash) return navigate("home", { push: false });
   app.innerHTML = `
-    <main class="app-shell flash-shell">
+    <main class="app-shell flash-shell" style="${gameFontStyle(flash.gameFontSize)}">
       <div class="quiz-header">
         <div id="flash-count"></div>
-        <button class="btn btn-ghost" id="finish-flash" type="button">終了</button>
+        <div class="row row-wrap font-controls">
+          <button class="btn btn-ghost font-step" id="flash-font-smaller" type="button">A−</button>
+          <span id="flash-font-label" class="small">${flash.gameFontSize}px</span>
+          <button class="btn btn-ghost font-step" id="flash-font-larger" type="button">A＋</button>
+          <button class="btn btn-ghost" id="finish-flash" type="button">終了</button>
+        </div>
       </div>
       <div id="flash-progress"></div>
       <section class="flash-content" id="flash-content"></section>
@@ -1716,6 +1762,21 @@ function renderFlash() {
         <button class="btn btn-ghost" id="flash-next" type="button">次へ</button>
       </div>
     </main>`;
+  const changeFlashFontSize = delta => {
+    const next = clampInt(flash.gameFontSize + delta, 16, 96);
+    if (next === flash.gameFontSize) return;
+    flash.gameFontSize = next;
+    const settings = loadSettings();
+    saveSettings({ ...settings, gameFontSize: next });
+    applyGameFontStyle(document.querySelector(".flash-shell"), next);
+    document.getElementById("flash-font-label").textContent = `${next}px`;
+    document.getElementById("flash-font-smaller").disabled = next <= 16;
+    document.getElementById("flash-font-larger").disabled = next >= 96;
+  };
+  document.getElementById("flash-font-smaller").addEventListener("click", () => changeFlashFontSize(-4));
+  document.getElementById("flash-font-larger").addEventListener("click", () => changeFlashFontSize(4));
+  document.getElementById("flash-font-smaller").disabled = flash.gameFontSize <= 16;
+  document.getElementById("flash-font-larger").disabled = flash.gameFontSize >= 96;
   document.getElementById("finish-flash").addEventListener("click", () => {
     flash.stop(); state.flash = null; navigate("fields");
   });
@@ -1790,6 +1851,7 @@ function renderSettings() {
           <label><span>最大挑戦回数</span><input class="field" id="s-attempts" type="number" min="1" max="99" value="${settings.maxAttempts}"></label>
           <label><span>正誤表示時間（秒）</span><input class="field" id="s-feedback" type="number" min="0.1" max="60" step="0.1" value="${settings.feedbackDeci / 10}"></label>
           <label><span>めくり表示時間（秒）</span><input class="field" id="s-flash" type="number" min="0.3" max="60" step="0.1" value="${settings.flashcardDeci / 10}"></label>
+          <label><span>ゲーム画面の文字サイズ（16〜96px）</span><input class="field" id="s-font-size" type="number" min="16" max="96" value="${settings.gameFontSize}"></label>
         </div>
         <label class="row"><input id="s-auto" type="checkbox" ${settings.autoAdvance ? "checked" : ""}><span>正誤表示後に自動で次へ</span></label>
         <label class="row"><input id="s-weak" type="checkbox" ${settings.weakPriority ? "checked" : ""}><span>苦手カードを優先</span></label>
@@ -1823,6 +1885,7 @@ function renderSettings() {
       maxAttempts: clampInt(document.getElementById("s-attempts").value, 1, 99),
       feedbackDeci: clampInt(Math.round(Number(document.getElementById("s-feedback").value) * 10), 1, 600),
       flashcardDeci: clampInt(Math.round(Number(document.getElementById("s-flash").value) * 10), 3, 600),
+      gameFontSize: clampInt(document.getElementById("s-font-size").value, 16, 96),
       autoAdvance: document.getElementById("s-auto").checked,
       weakPriority: document.getElementById("s-weak").checked,
       pauseWhileSelecting: document.getElementById("s-selection-pause").checked

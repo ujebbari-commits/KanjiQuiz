@@ -75,7 +75,7 @@ a { color: #c4b5fd; }
 .btn-danger { background: #7f1d1d; }
 .btn-ghost { background: transparent; border-color: var(--border); }
 .btn-wide { width: 100%; }
-.btn-choice { width: 100%; text-align: center; font-size: 1.08rem; padding: 13px; }
+.btn-choice { width: 100%; text-align: center; font-size: var(--game-choice-size, 21px); padding: 13px; }
 
 .field, .select, .textarea {
   width: 100%;
@@ -177,15 +177,15 @@ th { background: var(--surface-2); }
   touch-action: pan-y;
 }
 .prompt-text {
-  font-size: clamp(2.2rem, 10vw, 4rem);
+  font-size: var(--game-font-size, 44px);
   line-height: 1.32;
   font-weight: 800;
   text-align: center;
 }
 .feedback { display: grid; gap: 12px; text-align: center; width: 100%; }
 .feedback-title { font-size: 1.75rem; font-weight: 800; }
-.feedback-question { font-size: clamp(1.7rem, 7vw, 2.7rem); font-weight: 800; }
-.feedback-answer { font-size: clamp(1.25rem, 5vw, 1.8rem); color: var(--success); font-weight: 750; }
+.feedback-question { font-size: var(--game-feedback-question-size, 31px); font-weight: 800; }
+.feedback-answer { font-size: var(--game-answer-size, 24px); color: var(--success); font-weight: 750; }
 .correct { color: var(--success); }
 .wrong { color: var(--danger); }
 
@@ -213,7 +213,10 @@ th { background: var(--surface-2); }
 
 .flash-shell { min-height: calc(100dvh - 34px); display: flex; flex-direction: column; gap: 14px; }
 .flash-content { flex: 1; display: grid; place-items: center; text-align: center; gap: 24px; }
-.flash-question { font-size: clamp(2rem, 9vw, 3.6rem); font-weight: 800; }
-.flash-answer { font-size: clamp(1.2rem, 5vw, 2rem); color: var(--success); font-weight: 700; }
+.flash-question { font-size: var(--game-font-size, 44px); font-weight: 800; }
+.flash-answer { font-size: var(--game-flash-answer-size, 26px); color: var(--success); font-weight: 700; }
 
 .footer-note { margin-top: 18px; text-align: center; color: var(--muted); font-size: .82rem; }
+
+.font-step { min-width: 44px; padding-inline: 10px; }
+.font-controls { justify-content: flex-end; gap: 4px; }

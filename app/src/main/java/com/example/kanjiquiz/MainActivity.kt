@@ -95,7 +95,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.4"
+private const val APP_VERSION = "1.5"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -114,6 +114,7 @@ data class Settings(
     val gameMode: GameMode = GameMode.NORMAL,
     val weakPriority: Boolean = true,
     val maxAttempts: Int = 3,
+    val gameFontSizeSp: Int = 44,
 )
 
 data class RoundConfig(
@@ -125,6 +126,7 @@ data class RoundConfig(
     val feedbackDeci: Int,
     val weakPriority: Boolean,
     val maxAttempts: Int,
+    val gameFontSizeSp: Int,
     val choicePool: List<QuizItem>,
     val dailyKey: String? = null,
     val threeCorrectKey: String? = null,
@@ -166,6 +168,7 @@ class Store(context: Context) {
             .getOrDefault(GameMode.NORMAL),
         weakPriority = sp.getBoolean("weakPriority", true),
         maxAttempts = sp.getInt("maxAttempts", 3).coerceIn(1, 99),
+        gameFontSizeSp = sp.getInt("gameFontSizeSp", 44).coerceIn(16, 96),
     )
 
     fun saveSettings(s: Settings) {
@@ -179,6 +182,7 @@ class Store(context: Context) {
             .putString("gameMode", s.gameMode.name)
             .putBoolean("weakPriority", s.weakPriority)
             .putInt("maxAttempts", s.maxAttempts.coerceIn(1, 99))
+            .putInt("gameFontSizeSp", s.gameFontSizeSp.coerceIn(16, 96))
             .apply()
     }
 
@@ -643,6 +647,7 @@ private fun App() {
             feedbackDeci = settings.feedbackDeci,
             weakPriority = settings.weakPriority,
             maxAttempts = settings.maxAttempts.coerceIn(1, 99),
+            gameFontSizeSp = settings.gameFontSizeSp.coerceIn(16, 96),
             choicePool = pool,
             dailyKey = if (gameMode == GameMode.DAILY) makeDailyKey(reverse) else null,
             threeCorrectKey = threeCorrectKey,
@@ -880,6 +885,10 @@ private fun App() {
             val currentConfig = config!!
             QuizScreen(
                 config = currentConfig,
+                onGameFontSizeChanged = { size ->
+                    settings = settings.copy(gameFontSizeSp = size)
+                    store.saveSettings(settings)
+                },
                 onThreeCorrectProgressChanged = { noteId, count ->
                     currentConfig.threeCorrectKey?.let { key ->
                         store.updateThreeCorrectProgress(key, noteId, count)
@@ -894,6 +903,11 @@ private fun App() {
             FlashcardScreen(
                 items = flashItems,
                 secDeci = settings.flashcardDeci,
+                initialFontSizeSp = settings.gameFontSizeSp,
+                onGameFontSizeChanged = { size ->
+                    settings = settings.copy(gameFontSizeSp = size)
+                    store.saveSettings(settings)
+                },
                 onDone = { stage = Stage.FIELDS },
             )
         }
@@ -1053,6 +1067,30 @@ private fun AttemptCountField(value: Int, onChange: (Int) -> Unit) {
 }
 
 @Composable
+private fun GameFontSizeField(value: Int, onChange: (Int) -> Unit) {
+    var text by remember(value) { mutableStateOf(value.toString()) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { raw ->
+            val digits = raw.filter { it.isDigit() }.take(2)
+            text = digits
+            digits.toIntOrNull()?.takeIf { it in 16..96 }?.let(onChange)
+        },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        label = { Text("ゲーム画面の文字サイズ") },
+        supportingText = {
+            Text("16〜96sp。ゲーム中も A− / A＋ で変更できます")
+        },
+        suffix = { Text("sp") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Number,
+            imeAction = ImeAction.Done,
+        ),
+    )
+}
+
+@Composable
 private fun SettingsScreen(
     settings: Settings,
     onChange: (Settings) -> Unit,
@@ -1090,6 +1128,10 @@ private fun SettingsScreen(
 
         AttemptCountField(settings.maxAttempts) { attempts ->
             onChange(settings.copy(maxAttempts = attempts))
+        }
+
+        GameFontSizeField(settings.gameFontSizeSp) { size ->
+            onChange(settings.copy(gameFontSizeSp = size))
         }
 
         Row(
@@ -1419,6 +1461,10 @@ private fun FieldScreen(
                 onChangeSettings(settings.copy(maxAttempts = attempts))
             }
 
+            GameFontSizeField(settings.gameFontSizeSp) { size ->
+                onChangeSettings(settings.copy(gameFontSizeSp = size))
+            }
+
             if (settings.gameMode in listOf(
                     GameMode.NORMAL,
                     GameMode.SURVIVAL,
@@ -1520,6 +1566,7 @@ private enum class Phase { ASKING, FEEDBACK }
 @Composable
 private fun QuizScreen(
     config: RoundConfig,
+    onGameFontSizeChanged: (Int) -> Unit,
     onThreeCorrectProgressChanged: (Long, Int) -> Unit,
     onFinish: (RoundResult) -> Unit,
     onQuit: () -> Unit,
@@ -1534,6 +1581,7 @@ private fun QuizScreen(
     val perQuestionTimer = !isTimeAttack && config.timeLimitSec > 0
     val limit = config.timeLimitSec.toFloat()
     val maxAttempts = config.maxAttempts.coerceIn(1, 99)
+    var gameFontSizeSp by remember { mutableIntStateOf(config.gameFontSizeSp.coerceIn(16, 96)) }
 
     var cycleItems by remember { mutableStateOf(baseItems) }
     val masteryQueue = remember {
@@ -1567,6 +1615,14 @@ private fun QuizScreen(
     val logs = remember { mutableStateListOf<AnswerLog>() }
     val focusRequester = remember { FocusRequester() }
     val startedAt = remember { System.currentTimeMillis() }
+
+    fun changeGameFontSize(delta: Int) {
+        val next = (gameFontSizeSp + delta).coerceIn(16, 96)
+        if (next != gameFontSizeSp) {
+            gameFontSizeSp = next
+            onGameFontSizeChanged(next)
+        }
+    }
 
     val item = when {
         isMastery -> masteryQueue.first()
@@ -1829,7 +1885,20 @@ private fun QuizScreen(
                 fontWeight = FontWeight.Bold,
             )
         }
-        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = { changeGameFontSize(-4) }, enabled = gameFontSizeSp > 16) {
+                Text("A−")
+            }
+            Text("${gameFontSizeSp}sp", fontSize = 12.sp)
+            TextButton(onClick = { changeGameFontSize(4) }, enabled = gameFontSizeSp < 96) {
+                Text("A＋")
+            }
+        }
+        Spacer(Modifier.height(4.dp))
         when {
             isTimeAttack -> LinearProgressIndicator(
                 progress = { (globalRemaining / TIME_ATTACK_SEC).coerceIn(0f, 1f) },
@@ -1849,8 +1918,8 @@ private fun QuizScreen(
                 SelectionContainer {
                     Text(
                         promptText,
-                        fontSize = 44.sp,
-                        lineHeight = 56.sp,
+                        fontSize = gameFontSizeSp.sp,
+                        lineHeight = (gameFontSizeSp * 1.25f).sp,
                         fontWeight = FontWeight.Bold,
                         textAlign = TextAlign.Center,
                     )
@@ -1875,8 +1944,8 @@ private fun QuizScreen(
                     SelectionContainer {
                         Text(
                             promptText,
-                            fontSize = 30.sp,
-                            lineHeight = 40.sp,
+                            fontSize = (gameFontSizeSp * 0.70f).coerceAtLeast(16f).sp,
+                            lineHeight = (gameFontSizeSp * 0.90f).coerceAtLeast(22f).sp,
                             fontWeight = FontWeight.Bold,
                             textAlign = TextAlign.Center,
                         )
@@ -1885,8 +1954,8 @@ private fun QuizScreen(
                     SelectionContainer {
                         Text(
                             answerText,
-                            fontSize = 22.sp,
-                            lineHeight = 30.sp,
+                            fontSize = (gameFontSizeSp * 0.55f).coerceAtLeast(16f).sp,
+                            lineHeight = (gameFontSizeSp * 0.75f).coerceAtLeast(22f).sp,
                             textAlign = TextAlign.Center,
                             fontWeight = FontWeight.Bold,
                             color = CorrectGreen,
@@ -1952,7 +2021,10 @@ private fun QuizScreen(
                         onClick = { judge(option == item.question, option) },
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     ) {
-                        Text(option.replace("\n", " "), fontSize = 20.sp)
+                        Text(
+                            option.replace("\n", " "),
+                            fontSize = (gameFontSizeSp * 0.48f).coerceIn(16f, 36f).sp,
+                        )
                     }
                 }
                 TextButton(
@@ -2000,13 +2072,28 @@ private fun QuizScreen(
 }
 
 @Composable
-private fun FlashcardScreen(items: List<Pair<String, String>>, secDeci: Int, onDone: () -> Unit) {
+private fun FlashcardScreen(
+    items: List<Pair<String, String>>,
+    secDeci: Int,
+    initialFontSizeSp: Int,
+    onGameFontSizeChanged: (Int) -> Unit,
+    onDone: () -> Unit,
+) {
     BackHandler { onDone() }
     val perCardMillis = secDeci * 100L
     var index by remember { mutableIntStateOf(0) }
     var elapsed by remember { mutableFloatStateOf(0f) }
     var paused by remember { mutableStateOf(false) }
     var finished by remember { mutableStateOf(false) }
+    var gameFontSizeSp by remember { mutableIntStateOf(initialFontSizeSp.coerceIn(16, 96)) }
+
+    fun changeGameFontSize(delta: Int) {
+        val next = (gameFontSizeSp + delta).coerceIn(16, 96)
+        if (next != gameFontSizeSp) {
+            gameFontSizeSp = next
+            onGameFontSizeChanged(next)
+        }
+    }
 
     fun toCard(i: Int) { index = i; elapsed = 0f }
 
@@ -2043,7 +2130,16 @@ private fun FlashcardScreen(items: List<Pair<String, String>>, secDeci: Int, onD
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("${index + 1} / ${items.size}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            TextButton(onClick = onDone) { Text("やめる") }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { changeGameFontSize(-4) }, enabled = gameFontSizeSp > 16) {
+                    Text("A−")
+                }
+                Text("${gameFontSizeSp}sp", fontSize = 12.sp)
+                TextButton(onClick = { changeGameFontSize(4) }, enabled = gameFontSizeSp < 96) {
+                    Text("A＋")
+                }
+                TextButton(onClick = onDone) { Text("やめる") }
+            }
         }
         Spacer(Modifier.height(8.dp))
         LinearProgressIndicator(
@@ -2057,15 +2153,25 @@ private fun FlashcardScreen(items: List<Pair<String, String>>, secDeci: Int, onD
             Column(horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.verticalScroll(rememberScrollState())) {
                 SelectionContainer {
-                    Text(front, fontSize = 40.sp, lineHeight = 52.sp,
-                        fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                    Text(
+                        front,
+                        fontSize = gameFontSizeSp.sp,
+                        lineHeight = (gameFontSizeSp * 1.25f).sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                    )
                 }
                 Spacer(Modifier.height(16.dp))
                 HorizontalDivider(modifier = Modifier.fillMaxWidth().padding(horizontal = 40.dp))
                 Spacer(Modifier.height(16.dp))
                 SelectionContainer {
-                    Text(back, fontSize = 24.sp, lineHeight = 34.sp, textAlign = TextAlign.Center,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        back,
+                        fontSize = (gameFontSizeSp * 0.60f).coerceAtLeast(16f).sp,
+                        lineHeight = (gameFontSizeSp * 0.82f).coerceAtLeast(22f).sp,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 if (paused) {
                     Spacer(Modifier.height(16.dp))
