@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.5";
+const APP_VERSION = "0.1.6";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -1319,7 +1319,7 @@ class QuizSession {
     const remainingAttempts = this.config.maxAttempts - this.attemptNumber + 1;
     this.retryNotice = `不正解。あと${remainingAttempts}回挑戦できます。`;
     this.questionSerial += 1;
-    this.remaining = this.config.timeLimitSec;
+    // 同じ1問への再挑戦なので、残り時間は引き継ぐ。
     this.lastGained = 0;
     this.lastTimeBonus = 0;
     this.phase = "ASKING";
@@ -1466,6 +1466,26 @@ function renderQuiz() {
   session.startTimer();
 }
 
+function bindImmediateQuizAction(button, action) {
+  let handledByPointerDown = false;
+  button.addEventListener("pointerdown", event => {
+    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+    // Firefox Androidではblur→Viewport変更でclickが取り消されるため、
+    // レイアウトが動く前のpointerdownで処理する。
+    event.preventDefault();
+    handledByPointerDown = true;
+    action();
+  });
+  button.addEventListener("click", event => {
+    if (handledByPointerDown) {
+      handledByPointerDown = false;
+      event.preventDefault();
+      return;
+    }
+    action();
+  });
+}
+
 function renderQuizQuestion(session) {
   if (state.screen !== "quiz" || session.ended) return;
   quizInputFocused = false;
@@ -1499,7 +1519,7 @@ function renderQuizQuestion(session) {
       if (!normalized) return;
       session.judge(session.item.accepted.includes(normalized), input.value);
     };
-    document.getElementById("submit-answer").addEventListener("click", submit);
+    bindImmediateQuizAction(document.getElementById("submit-answer"), submit);
     input.addEventListener("focus", () => {
       quizInputFocused = true;
       quizViewportBaseline = Math.max(quizViewportBaseline, currentQuizViewportHeight());
@@ -1518,7 +1538,7 @@ function renderQuizQuestion(session) {
     });
     setTimeout(() => input.focus({ preventScroll: true }), 50);
   }
-  document.getElementById("pass-question").addEventListener("click", () => session.judge(false, ""));
+  bindImmediateQuizAction(document.getElementById("pass-question"), () => session.judge(false, ""));
   installSelectionPause(session);
   updateQuizTimerUi(session);
 }

@@ -62,12 +62,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -98,7 +100,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.7"
+private const val APP_VERSION = "1.8"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -1619,6 +1621,7 @@ private fun QuizScreen(
     var showConfirm by remember { mutableStateOf(false) }
     val logs = remember { mutableStateListOf<AnswerLog>() }
     val focusRequester = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
     val startedAt = remember { System.currentTimeMillis() }
 
     fun changeGameFontSize(delta: Int) {
@@ -1670,7 +1673,7 @@ private fun QuizScreen(
         retryNotice = "不正解。あと${remainingAttempts}回挑戦できます。"
         questionSerial++
         input = ""
-        remaining = limit
+        // 同じ1問への再挑戦なので、残り時間は引き継ぐ。
         lastGained = 0
         lastTimeBonus = 0
         phase = Phase.ASKING
@@ -1781,6 +1784,22 @@ private fun QuizScreen(
         lastCorrect = correct
         logs.add(AnswerLog(item, correct, recorded))
         phase = Phase.FEEDBACK
+    }
+
+    fun submitTypedAnswer() {
+        val recorded = input
+        val normalized = normalizeKana(recorded)
+        if (normalized.isEmpty()) return
+        judge(normalized in item.accepted, recorded)
+        // 再挑戦なら入力を続けやすいようIMEを維持し、結果表示へ進む場合だけ閉じる。
+        if (phase != Phase.ASKING) {
+            focusManager.clearFocus(force = true)
+        }
+    }
+
+    fun passQuestion() {
+        judge(false, "")
+        focusManager.clearFocus(force = true)
     }
 
     BackHandler { showConfirm = true }
@@ -2055,23 +2074,34 @@ private fun QuizScreen(
                     Text("パス →")
                 }
             } else {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .focusRequester(focusRequester),
-                    placeholder = { Text("よみを ひらがなで入力") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = {
-                        val normalized = normalizeKana(input)
-                        if (normalized.isNotEmpty()) judge(normalized in item.accepted, input)
-                    }),
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = input,
+                        onValueChange = { input = it },
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusRequester(focusRequester),
+                        placeholder = { Text("よみを ひらがなで入力") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { submitTypedAnswer() }),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = { submitTypedAnswer() },
+                        modifier = Modifier.focusProperties { canFocus = false },
+                    ) {
+                        Text("回答")
+                    }
+                }
                 TextButton(
-                    onClick = { judge(false, "") },
-                    modifier = Modifier.align(Alignment.End),
+                    onClick = { passQuestion() },
+                    modifier = Modifier
+                        .align(Alignment.End)
+                        .focusProperties { canFocus = false },
                 ) {
                     Text("パス →")
                 }
