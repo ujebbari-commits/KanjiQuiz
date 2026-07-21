@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.0";
+const APP_VERSION = "0.1.2";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -136,6 +136,39 @@ function loadCardStats() {
 
 function saveCardStats(stats) {
   writeJson("kq.cardStats", stats);
+}
+
+function loadThreeCorrectProgress() {
+  return readJson("kq.threeCorrectProgress", {});
+}
+
+function threeCorrectProfileKey(deck, prefs, reverse) {
+  return `v1|${deck.id}|${[...prefs.qFields].sort((a, b) => a - b).join(",")}|${[...prefs.aFields].sort((a, b) => a - b).join(",")}|${reverse}`;
+}
+
+function getThreeCorrectProfile(profileKey) {
+  const root = loadThreeCorrectProgress();
+  return root[profileKey] && typeof root[profileKey] === "object" ? root[profileKey] : {};
+}
+
+function setThreeCorrectCount(profileKey, noteId, count) {
+  const root = loadThreeCorrectProgress();
+  const profile = root[profileKey] && typeof root[profileKey] === "object" ? { ...root[profileKey] } : {};
+  const key = String(noteId);
+  const clamped = Math.max(0, Math.min(THREE_CORRECT_TARGET, Number(count) || 0));
+  if (clamped === 0) delete profile[key]; else profile[key] = clamped;
+  if (Object.keys(profile).length) root[profileKey] = profile; else delete root[profileKey];
+  writeJson("kq.threeCorrectProgress", root);
+}
+
+function resetThreeCorrectProfile(profileKey) {
+  const root = loadThreeCorrectProgress();
+  delete root[profileKey];
+  writeJson("kq.threeCorrectProgress", root);
+}
+
+function resetAllThreeCorrectProgress() {
+  localStorage.removeItem("kq.threeCorrectProgress");
 }
 
 function statKey(deckId, noteId) {
@@ -446,6 +479,83 @@ function genericObjectRowsToDeck(rows, name) {
   }, name);
 }
 
+
+function decodeFileBytes(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return new TextDecoder("utf-16le").decode(bytes.subarray(2));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    const swapped = new Uint8Array(bytes.length - 2);
+    for (let index = 2; index + 1 < bytes.length; index += 2) {
+      swapped[index - 2] = bytes[index + 1];
+      swapped[index - 1] = bytes[index];
+    }
+    return new TextDecoder("utf-16le").decode(swapped);
+  }
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+function readFileWithReader(file, asArrayBuffer = false) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("FileReaderで読み込めませんでした。"));
+    reader.onabort = () => reject(new Error("ファイルの読み込みが中断されました。"));
+    if (asArrayBuffer) reader.readAsArrayBuffer(file);
+    else reader.readAsText(file, "UTF-8");
+  });
+}
+
+async function readSelectedFile(file) {
+  const errors = [];
+  const acceptNonEmpty = value => typeof value === "string" && value.replace(/^\uFEFF/, "").trim().length > 0;
+
+  if (typeof file.text === "function") {
+    try {
+      const text = await file.text();
+      if (acceptNonEmpty(text)) return text;
+      errors.push("Blob.text()が空文字を返しました");
+    } catch (error) {
+      errors.push(`Blob.text(): ${error?.message || error}`);
+    }
+  }
+
+  if (typeof file.arrayBuffer === "function") {
+    try {
+      const text = decodeFileBytes(await file.arrayBuffer());
+      if (acceptNonEmpty(text)) return text;
+      errors.push("Blob.arrayBuffer()が空データを返しました");
+    } catch (error) {
+      errors.push(`Blob.arrayBuffer(): ${error?.message || error}`);
+    }
+  }
+
+  try {
+    const result = await readFileWithReader(file, false);
+    const text = typeof result === "string" ? result : "";
+    if (acceptNonEmpty(text)) return text;
+    errors.push("FileReader.readAsText()が空文字を返しました");
+  } catch (error) {
+    errors.push(`FileReader.readAsText(): ${error?.message || error}`);
+  }
+
+  try {
+    const result = await readFileWithReader(file, true);
+    const text = result instanceof ArrayBuffer ? decodeFileBytes(result) : "";
+    if (acceptNonEmpty(text)) return text;
+    errors.push("FileReader.readAsArrayBuffer()が空データを返しました");
+  } catch (error) {
+    errors.push(`FileReader.readAsArrayBuffer(): ${error?.message || error}`);
+  }
+
+  const sizeText = Number.isFinite(file.size) ? `${file.size}バイト` : "サイズ不明";
+  const zeroSizeHelp = file.size === 0
+    ? " Androidのファイル選択画面では0バイトとして渡されています。ファイル管理アプリでDownloadへコピーし直すか、別名で保存し直してから選択してください。"
+    : "";
+  throw new Error(`「${file.name || "選択ファイル"}」を読み取れませんでした（${sizeText}）。${zeroSizeHelp} ${errors.join(" / ")}`.trim());
+}
+
 function parseImportText(text, filename, firstRowHeaders = true) {
   const trimmed = text.replace(/^\uFEFF/, "").trim();
   if (!trimmed) throw new Error("ファイルまたは貼り付け内容が空です。");
@@ -627,6 +737,7 @@ function renderImport() {
           <span>先頭行をフィールド名として使う（CSV・TSV）</span>
         </label>
         <div class="subtle small">AnkiDroidからはAndroid版v1.3の「Web版用JSONを保存」を使ってください。Anki Desktopのテキスト書き出しはTSVとして読み込めます。</div>
+        ${state.importFilename ? `<div class="subtle small">選択中: ${escapeHtml(state.importFilename)}${state.importRaw ? `・読み取り済み ${new Blob([state.importRaw]).size}バイト` : ""}</div>` : ""}
       </div>
 
       <div class="card stack">
@@ -649,8 +760,8 @@ function renderImport() {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      state.importRaw = await file.text();
       state.importFilename = file.name;
+      state.importRaw = await readSelectedFile(file);
       state.importDraft = parseImportText(state.importRaw, file.name, headerCheck.checked);
       state.importError = "";
     } catch (error) {
@@ -710,7 +821,7 @@ function renderImport() {
 }
 
 function restoreAppData(appData) {
-  const allowed = ["settings", "history", "cardStats", "streak", "dailyCompleted"];
+  const allowed = ["settings", "history", "cardStats", "streak", "dailyCompleted", "threeCorrectProgress"];
   for (const key of allowed) {
     if (appData[key] != null) writeJson(`kq.${key}`, appData[key]);
   }
@@ -786,6 +897,7 @@ function renderFields() {
         <label class="row"><input id="weak-priority" type="checkbox" ${settings.weakPriority ? "checked" : ""}><span>苦手カードを優先</span></label>
         <label class="row"><input id="auto-advance" type="checkbox" ${settings.autoAdvance ? "checked" : ""}><span>正誤表示後に自動で次へ</span></label>
         ${dailyDone ? `<div class="notice">今日の正式なデイリーチャレンジは完了済みです。再挑戦できますが履歴には追加されません。</div>` : ""}
+        <div id="three-correct-panel" class="notice" hidden></div>
       </div>
 
       <div id="field-error"></div>
@@ -797,6 +909,34 @@ function renderFields() {
       <button class="btn btn-ghost btn-wide" type="button" data-nav="home">デッキ一覧へ</button>
     </div>
   `);
+
+  const updateThreeCorrectPanel = () => {
+    const panel = document.getElementById("three-correct-panel");
+    const selectedMode = document.getElementById("game-mode").value;
+    if (selectedMode !== "THREE_CORRECT") {
+      panel.hidden = true;
+      panel.innerHTML = "";
+      return;
+    }
+    const reverse = document.getElementById("reverse-mode").value === "true";
+    const profileKey = threeCorrectProfileKey(deck, prefs, reverse);
+    const progress = getThreeCorrectProfile(profileKey);
+    const usable = makeUsableItems(deck, prefs, reverse);
+    const completed = usable.filter(item => (progress[String(item.noteId)] || 0) >= THREE_CORRECT_TARGET).length;
+    panel.hidden = false;
+    panel.innerHTML = `
+      <div><strong>累積達成 ${completed}/${usable.length}</strong></div>
+      <div class="small">正解で+1、不正解で-1。3に到達したカードは以後出題されません。</div>
+      <button class="btn btn-ghost btn-wide" id="reset-three-current" type="button">この設定の累積回数をリセット</button>`;
+    document.getElementById("reset-three-current").addEventListener("click", () => {
+      if (!confirm("このデッキ・フィールド・出題方向の累積正解数をリセットしますか？")) return;
+      resetThreeCorrectProfile(profileKey);
+      updateThreeCorrectPanel();
+    });
+  };
+
+  document.getElementById("game-mode").addEventListener("change", updateThreeCorrectPanel);
+  document.getElementById("reverse-mode").addEventListener("change", updateThreeCorrectPanel);
 
   document.querySelectorAll("[data-mode]").forEach(button => {
     button.addEventListener("click", () => {
@@ -810,12 +950,14 @@ function renderFields() {
     input.addEventListener("change", () => {
       prefs.qFields = toggleIndex(prefs.qFields, Number(input.dataset.qField), input.checked);
       saveFieldPrefs(deck.id, prefs);
+      updateThreeCorrectPanel();
     });
   });
   document.querySelectorAll("[data-a-field]").forEach(input => {
     input.addEventListener("change", () => {
       prefs.aFields = toggleIndex(prefs.aFields, Number(input.dataset.aField), input.checked);
       saveFieldPrefs(deck.id, prefs);
+      updateThreeCorrectPanel();
     });
   });
 
@@ -842,12 +984,16 @@ function renderFields() {
     if (!config.items.length) {
       const message = nextSettings.gameMode === "WEAK_CHALLENGE"
         ? "苦手語がまだありません。まず通常モードなどで問題を解いてください。"
-        : "この組み合わせでは問題を作れませんでした。";
+        : nextSettings.gameMode === "THREE_CORRECT"
+          ? "この設定では、すべてのカードが累積3回正解に到達しています。"
+          : "この組み合わせでは問題を作れませんでした。";
       errorBox.innerHTML = `<div class="error">${escapeHtml(message)}</div>`;
       return;
     }
     startQuiz(config);
   });
+
+  updateThreeCorrectPanel();
 
   document.getElementById("export-deck").addEventListener("click", () => {
     downloadJson(`${safeFilename(deck.name)}.kanjiquiz.json`, {
@@ -943,11 +1089,17 @@ function createRoundConfig(deck, prefs, settings, options = {}) {
   const reverse = options.reverse ?? settings.reverse;
   const pool = makeUsableItems(deck, prefs, reverse);
   const gameMode = options.gameMode ?? settings.gameMode;
-  const items = options.fixedItems ?? selectRoundItems(pool, gameMode, { ...settings, reverse }, deck, prefs);
+  const threeCorrectKey = gameMode === "THREE_CORRECT" ? threeCorrectProfileKey(deck, prefs, reverse) : null;
+  const savedThreeCorrect = threeCorrectKey ? getThreeCorrectProfile(threeCorrectKey) : {};
+  const eligiblePool = gameMode === "THREE_CORRECT"
+    ? pool.filter(item => (savedThreeCorrect[String(item.noteId)] || 0) < THREE_CORRECT_TARGET)
+    : pool;
+  const selected = options.fixedItems ?? selectRoundItems(eligiblePool, gameMode, { ...settings, reverse }, deck, prefs);
+  const items = uniqueBy(selected, item => item.noteId);
   return {
     deck,
     prefs: structuredClone(prefs),
-    items: uniqueBy(items, item => item.noteId),
+    items,
     gameMode,
     reverse,
     timeLimitSec: settings.timeLimitSec,
@@ -957,7 +1109,11 @@ function createRoundConfig(deck, prefs, settings, options = {}) {
     maxAttempts: settings.maxAttempts,
     pauseWhileSelecting: settings.pauseWhileSelecting,
     choicePool: pool,
-    dailyKey: gameMode === "DAILY" ? makeDailyKey(deck, prefs.qFields, prefs.aFields, reverse) : null
+    dailyKey: gameMode === "DAILY" ? makeDailyKey(deck, prefs.qFields, prefs.aFields, reverse) : null,
+    threeCorrectKey,
+    initialThreeCorrectCounts: gameMode === "THREE_CORRECT"
+      ? Object.fromEntries(items.map(item => [String(item.noteId), savedThreeCorrect[String(item.noteId)] || 0]))
+      : {}
   };
 }
 
@@ -986,7 +1142,7 @@ class QuizSession {
     this.cycleItems = [...config.items];
     this.masteryQueue = shuffle(config.items);
     this.threeCorrectQueue = shuffle(config.items);
-    this.threeCorrectCounts = new Map();
+    this.threeCorrectCounts = new Map(Object.entries(config.initialThreeCorrectCounts || {}));
     this.index = 0;
     this.attemptNumber = 1;
     this.questionSerial = 0;
@@ -1027,6 +1183,17 @@ class QuizSession {
   get promptText() { return this.config.reverse ? this.item.displayAnswer : this.item.question; }
   get answerText() { return this.config.reverse ? this.item.question : this.item.displayAnswer; }
   get choices() { return this.config.reverse ? smartReverseChoices(this.item, this.config.choicePool) : []; }
+
+  getThreeCorrectCount(noteId) {
+    return Number(this.threeCorrectCounts.get(String(noteId)) || 0);
+  }
+
+  setThreeCorrectCount(noteId, count) {
+    const updated = Math.max(0, Math.min(THREE_CORRECT_TARGET, Number(count) || 0));
+    this.threeCorrectCounts.set(String(noteId), updated);
+    if (this.config.threeCorrectKey) setThreeCorrectCount(this.config.threeCorrectKey, noteId, updated);
+    return updated;
+  }
 
   startTimer() {
     this.stopTimer();
@@ -1126,8 +1293,7 @@ class QuizSession {
       this.lastGained = 50 + speed + (this.combo - 1) * 5;
       this.score += this.lastGained;
       if (this.isThreeCorrect) {
-        const current = this.threeCorrectCounts.get(this.item.noteId) || 0;
-        this.threeCorrectCounts.set(this.item.noteId, Math.min(THREE_CORRECT_TARGET, current + 1));
+        this.setThreeCorrectCount(this.item.noteId, this.getThreeCorrectCount(this.item.noteId) + 1);
       }
       if (this.isTimeAttack) {
         const comboBonus = this.combo % 5 === 0 ? 2 : 0;
@@ -1139,6 +1305,9 @@ class QuizSession {
       this.lastGained = 0;
       this.lastTimeBonus = 0;
       if (this.isSurvival) this.lives -= 1;
+      if (this.isThreeCorrect) {
+        this.setThreeCorrectCount(this.item.noteId, this.getThreeCorrectCount(this.item.noteId) - 1);
+      }
     }
     this.lastCorrect = correct;
     this.logs.push({ item: this.item, correct, input: recorded });
@@ -1161,7 +1330,7 @@ class QuizSession {
 
     if (this.isThreeCorrect) {
       const answered = this.threeCorrectQueue.shift();
-      const count = this.threeCorrectCounts.get(answered.noteId) || 0;
+      const count = this.getThreeCorrectCount(answered.noteId);
       if (count < THREE_CORRECT_TARGET) this.threeCorrectQueue.push(answered);
       if (!this.threeCorrectQueue.length) return finishQuiz(this);
       this.resetForNextQuestion();
@@ -1273,7 +1442,7 @@ function renderQuizFeedback(session) {
   updateQuizHeaderUi(session);
   const log = session.logs.at(-1);
   const title = session.lastCorrect ? "⭕ 正解！" : log.input ? "❌ 不正解" : "⏰ 時間切れ・パス";
-  const currentThree = session.threeCorrectCounts.get(session.item.noteId) || 0;
+  const currentThree = session.getThreeCorrectCount(session.item.noteId);
   document.getElementById("quiz-main").innerHTML = `
     <div class="feedback">
       <div class="feedback-title ${session.lastCorrect ? "correct" : "wrong"}">${title}</div>
@@ -1282,7 +1451,7 @@ function renderQuizFeedback(session) {
       ${!session.lastCorrect && log.input ? `<div class="wrong small">あなたの解答：${escapeHtml(log.input)}</div>` : ""}
       ${session.lastCorrect && session.attemptNumber > 1 ? `<div class="subtle small">${session.attemptNumber}回目の挑戦で正解</div>` : ""}
       ${session.isThreeCorrect ? `<div class="${currentThree >= THREE_CORRECT_TARGET ? "correct" : "subtle"}">
-        ${currentThree >= THREE_CORRECT_TARGET ? "このカードは3回正解：卒業" : `このカードの正解回数 ${currentThree}/${THREE_CORRECT_TARGET}`}
+        ${currentThree >= THREE_CORRECT_TARGET ? "累積3回正解：以後は出題されません" : `このカードの累積正解数 ${currentThree}/${THREE_CORRECT_TARGET}`}
       </div>` : ""}
       ${session.lastCorrect ? `<div class="correct"><strong>+${session.lastGained}</strong></div>` : ""}
       ${session.isTimeAttack && session.lastTimeBonus > 0 ? `<div class="combo">⏱ +${session.lastTimeBonus}秒${session.lastTimeBonus >= 3 ? "（5コンボボーナス）" : ""}</div>` : ""}
@@ -1300,7 +1469,7 @@ function shouldFinishAfterFeedback(session) {
   if (session.isSurvival && session.lives <= 0) return true;
   if (session.isMastery && session.lastCorrect && session.masteryQueue.length === 1) return true;
   if (session.isThreeCorrect && session.lastCorrect &&
-      (session.threeCorrectCounts.get(session.item.noteId) || 0) >= THREE_CORRECT_TARGET &&
+      session.getThreeCorrectCount(session.item.noteId) >= THREE_CORRECT_TARGET &&
       session.threeCorrectQueue.length === 1) return true;
   if (!session.isCycling && !session.isMastery && !session.isThreeCorrect && session.index + 1 >= session.cycleItems.length) return true;
   return false;
@@ -1318,7 +1487,7 @@ function updateQuizHeaderUi(session) {
   else if (session.isMastery) status.textContent = `残り ${session.masteryQueue.length}語`;
   else if (session.isThreeCorrect) {
     const total = [...session.threeCorrectCounts.values()].reduce((sum, value) => sum + value, 0);
-    status.textContent = `残り ${session.threeCorrectQueue.length}語・達成 ${total}/${session.baseItems.length * THREE_CORRECT_TARGET}`;
+    status.textContent = `残り ${session.threeCorrectQueue.length}語・累積 ${total}/${session.baseItems.length * THREE_CORRECT_TARGET}`;
   } else status.textContent = `${session.index + 1} / ${session.cycleItems.length}`;
   status.className = session.isTimeAttack && session.globalRemaining < 10 ? "wrong" : "";
   combo.textContent = session.combo >= 2 ? `🔥 ${session.combo} COMBO` : "";
@@ -1421,11 +1590,21 @@ function recordRoundResult(config, round) {
 
   const attemptedKeys = [...new Set(round.logs.map(log => statKey(config.deck.id, log.item.noteId)))];
   const masteredCount = attemptedKeys.filter(key => (beforeWrong[key] || 0) > 0 && (stats[key]?.[1] || 0) === 0).length;
+  let threeCorrectCompleted = 0;
+  let threeCorrectTotal = 0;
+  if (config.gameMode === "THREE_CORRECT" && config.threeCorrectKey) {
+    const progress = getThreeCorrectProfile(config.threeCorrectKey);
+    const allItems = makeUsableItems(config.deck, config.prefs, config.reverse);
+    threeCorrectTotal = allItems.length;
+    threeCorrectCompleted = allItems.filter(item => (progress[String(item.noteId)] || 0) >= THREE_CORRECT_TARGET).length;
+  }
   return {
     config,
     ...round,
     historyRecorded: shouldRecord,
-    masteredCount
+    masteredCount,
+    threeCorrectCompleted,
+    threeCorrectTotal
   };
 }
 
@@ -1454,6 +1633,11 @@ function renderResult() {
         </div>
         <div class="subtle">${correct}/${total}問正解・${result.durationSec}秒</div>
         ${result.masteredCount > 0 ? `<div class="success">苦手語を${result.masteredCount}件克服しました。</div>` : ""}
+        ${result.config.gameMode === "THREE_CORRECT" ? `<div class="${result.threeCorrectTotal > 0 && result.threeCorrectCompleted >= result.threeCorrectTotal ? "success" : "notice"}">
+          ${result.threeCorrectTotal > 0 && result.threeCorrectCompleted >= result.threeCorrectTotal
+            ? "この設定の全カードが累積3回正解に到達しました。"
+            : `累積達成 ${result.threeCorrectCompleted}/${result.threeCorrectTotal}`}
+        </div>` : ""}
         ${!result.historyRecorded && result.config.gameMode === "DAILY" ? `<div class="notice">今日のデイリー履歴はすでに記録済みです。</div>` : ""}
       </div>
 
@@ -1477,6 +1661,13 @@ function renderResult() {
           gameMode: result.config.gameMode,
           reverse: result.config.reverse
         });
+    if (!config.items.length) {
+      alert(config.gameMode === "THREE_CORRECT"
+        ? "この設定では、すべてのカードが累積3回正解に到達しています。"
+        : "この組み合わせでは問題を作れませんでした。");
+      navigate("fields");
+      return;
+    }
     startQuiz(config);
   });
 
@@ -1608,6 +1799,12 @@ function renderSettings() {
       </div>
 
       <div class="card stack">
+        <strong>3回正解モード</strong>
+        <div class="subtle small">累積正解数はデッキ・フィールド・出題方向ごとに保存されます。</div>
+        <button class="btn btn-danger btn-wide" id="reset-three-all" type="button">すべての累積回数をリセット</button>
+      </div>
+
+      <div class="card stack">
         <strong>バックアップ</strong>
         <div class="subtle small">デッキ、設定、履歴、苦手度を1つのJSONに保存します。</div>
         <button class="btn btn-ghost btn-wide" id="export-backup" type="button">Web版の全データを保存</button>
@@ -1634,6 +1831,12 @@ function renderSettings() {
     document.getElementById("settings-message").innerHTML = `<div class="success">保存しました。</div>`;
   });
 
+  document.getElementById("reset-three-all").addEventListener("click", () => {
+    if (!confirm("すべてのデッキ・フィールド・出題方向の累積正解数を削除しますか？")) return;
+    resetAllThreeCorrectProgress();
+    document.getElementById("settings-message").innerHTML = `<div class="success">3回正解モードの累積回数をリセットしました。</div>`;
+  });
+
   document.getElementById("export-backup").addEventListener("click", async () => {
     const decks = await dbGetAllDecks();
     downloadJson(`KanjiQuiz-Web-backup-${todayKey()}.json`, {
@@ -1646,7 +1849,8 @@ function renderSettings() {
         history: loadHistory(),
         cardStats: loadCardStats(),
         streak: readJson("kq.streak", { date: "", count: 0 }),
-        dailyCompleted: readJson("kq.dailyCompleted", {})
+        dailyCompleted: readJson("kq.dailyCompleted", {}),
+        threeCorrectProgress: loadThreeCorrectProgress()
       }
     });
   });

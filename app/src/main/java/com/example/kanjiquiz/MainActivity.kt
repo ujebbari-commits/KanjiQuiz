@@ -95,7 +95,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.3"
+private const val APP_VERSION = "1.4"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -127,6 +127,8 @@ data class RoundConfig(
     val maxAttempts: Int,
     val choicePool: List<QuizItem>,
     val dailyKey: String? = null,
+    val threeCorrectKey: String? = null,
+    val initialThreeCorrectCounts: Map<Long, Int> = emptyMap(),
 )
 
 data class RoundResult(
@@ -245,6 +247,49 @@ class Store(context: Context) {
         map.forEach { (id, a) -> o.put(id.toString(), JSONArray().put(a[0]).put(a[1])) }
         sp.edit().putString("cardStats", o.toString()).apply()
     }
+
+    fun loadThreeCorrectProgress(profileKey: String): MutableMap<Long, Int> {
+        val raw = sp.getString("threeCorrectProgress", null) ?: return mutableMapOf()
+        return runCatching {
+            val root = JSONObject(raw)
+            val profile = root.optJSONObject(profileKey) ?: return@runCatching mutableMapOf()
+            val result = mutableMapOf<Long, Int>()
+            profile.keys().forEach { noteId ->
+                result[noteId.toLong()] = profile.optInt(noteId, 0).coerceIn(0, THREE_CORRECT_TARGET)
+            }
+            result
+        }.getOrDefault(mutableMapOf())
+    }
+
+    fun saveThreeCorrectProgress(profileKey: String, progress: Map<Long, Int>) {
+        val root = runCatching {
+            JSONObject(sp.getString("threeCorrectProgress", "{}") ?: "{}")
+        }.getOrDefault(JSONObject())
+        val profile = JSONObject()
+        progress.forEach { (noteId, count) ->
+            val clamped = count.coerceIn(0, THREE_CORRECT_TARGET)
+            if (clamped > 0) profile.put(noteId.toString(), clamped)
+        }
+        if (profile.length() == 0) root.remove(profileKey) else root.put(profileKey, profile)
+        sp.edit().putString("threeCorrectProgress", root.toString()).apply()
+    }
+
+    fun updateThreeCorrectProgress(profileKey: String, noteId: Long, newCount: Int) {
+        val progress = loadThreeCorrectProgress(profileKey)
+        val clamped = newCount.coerceIn(0, THREE_CORRECT_TARGET)
+        if (clamped == 0) progress.remove(noteId) else progress[noteId] = clamped
+        saveThreeCorrectProgress(profileKey, progress)
+    }
+
+    fun clearThreeCorrectProgress(profileKey: String) {
+        val root = runCatching {
+            JSONObject(sp.getString("threeCorrectProgress", "{}") ?: "{}")
+        }.getOrDefault(JSONObject())
+        root.remove(profileKey)
+        sp.edit().putString("threeCorrectProgress", root.toString()).apply()
+    }
+
+    fun clearAllThreeCorrectProgress() = sp.edit().remove("threeCorrectProgress").apply()
 
     fun todayKey(): String = dayFmt.format(Date())
 
@@ -493,6 +538,8 @@ private fun App() {
     var lastConfig by remember { mutableStateOf<RoundConfig?>(null) }
     var lastHistoryRecorded by remember { mutableStateOf(true) }
     var lastMasteredCount by remember { mutableIntStateOf(0) }
+    var lastThreeCorrectCompleted by remember { mutableIntStateOf(0) }
+    var lastThreeCorrectTotal by remember { mutableIntStateOf(0) }
 
     fun weightedOrder(list: List<QuizItem>): List<QuizItem> {
         val stats = store.loadCardStats()
@@ -521,6 +568,13 @@ private fun App() {
     fun makeDailyKey(reverse: Boolean = settings.reverse): String = buildString {
         append(store.todayKey())
         append('|').append(deckName)
+        append('|').append(qFields.sorted().joinToString(","))
+        append('|').append(aFields.sorted().joinToString(","))
+        append('|').append(reverse)
+    }
+
+    fun makeThreeCorrectKey(reverse: Boolean = settings.reverse): String = buildString {
+        append("v1|").append(deckName)
         append('|').append(qFields.sorted().joinToString(","))
         append('|').append(aFields.sorted().joinToString(","))
         append('|').append(reverse)
@@ -567,9 +621,21 @@ private fun App() {
         reverse: Boolean = settings.reverse,
     ): RoundConfig {
         val pool = buildUsableItems(reverse)
-        val selected = fixedItems ?: selectRoundItems(pool, gameMode, reverse)
+        val threeCorrectKey = if (gameMode == GameMode.THREE_CORRECT) makeThreeCorrectKey(reverse) else null
+        val savedThreeCorrect = if (threeCorrectKey != null) {
+            store.loadThreeCorrectProgress(threeCorrectKey)
+        } else {
+            emptyMap()
+        }
+        val eligiblePool = if (gameMode == GameMode.THREE_CORRECT) {
+            pool.filter { (savedThreeCorrect[it.noteId] ?: 0) < THREE_CORRECT_TARGET }
+        } else {
+            pool
+        }
+        val selected = fixedItems ?: selectRoundItems(eligiblePool, gameMode, reverse)
+        val distinctItems = selected.distinctBy { it.noteId }
         return RoundConfig(
-            items = selected.distinctBy { it.noteId },
+            items = distinctItems,
             gameMode = gameMode,
             reverse = reverse,
             timeLimitSec = settings.timeLimitSec,
@@ -579,6 +645,12 @@ private fun App() {
             maxAttempts = settings.maxAttempts.coerceIn(1, 99),
             choicePool = pool,
             dailyKey = if (gameMode == GameMode.DAILY) makeDailyKey(reverse) else null,
+            threeCorrectKey = threeCorrectKey,
+            initialThreeCorrectCounts = if (gameMode == GameMode.THREE_CORRECT) {
+                distinctItems.associate { it.noteId to (savedThreeCorrect[it.noteId] ?: 0) }
+            } else {
+                emptyMap()
+            },
         )
     }
 
@@ -635,6 +707,18 @@ private fun App() {
         val attemptedIds = result.logs.map { it.item.noteId }.toSet()
         lastMasteredCount = attemptedIds.count { id ->
             (beforeWrong[id] ?: 0) > 0 && (stats[id]?.getOrElse(1) { 0 } ?: 0) == 0
+        }
+        val finishedThreeCorrectKey = finishedConfig.threeCorrectKey
+        if (finishedConfig.gameMode == GameMode.THREE_CORRECT && finishedThreeCorrectKey != null) {
+            val allItems = buildUsableItems(finishedConfig.reverse)
+            val progress = store.loadThreeCorrectProgress(finishedThreeCorrectKey)
+            lastThreeCorrectTotal = allItems.size
+            lastThreeCorrectCompleted = allItems.count {
+                (progress[it.noteId] ?: 0) >= THREE_CORRECT_TARGET
+            }
+        } else {
+            lastThreeCorrectTotal = 0
+            lastThreeCorrectCompleted = 0
         }
         lastLogs = result.logs
         lastScore = result.score
@@ -700,6 +784,7 @@ private fun App() {
         Stage.SETTINGS -> SettingsScreen(
             settings = settings,
             onChange = { settings = it; store.saveSettings(it) },
+            onResetThreeCorrectAll = { store.clearAllThreeCorrectProgress() },
             onBack = { stage = Stage.DECKS },
         )
 
@@ -717,6 +802,15 @@ private fun App() {
             } else {
                 false
             }
+            val threeCorrectSummary = if (settings.gameMode == GameMode.THREE_CORRECT &&
+                qFields.isNotEmpty() && aFields.isNotEmpty()
+            ) {
+                val usable = buildUsableItems(settings.reverse)
+                val progress = store.loadThreeCorrectProgress(makeThreeCorrectKey(settings.reverse))
+                usable.count { (progress[it.noteId] ?: 0) >= THREE_CORRECT_TARGET } to usable.size
+            } else {
+                null
+            }
             FieldScreen(
                 deckName = deckName,
                 sample = notes.first().second,
@@ -725,6 +819,7 @@ private fun App() {
                 mode = mode,
                 settings = settings,
                 dailyCompleted = dailyCompleted,
+                threeCorrectSummary = threeCorrectSummary,
                 error = fieldError,
                 exportMessage = webExportMessage,
                 onToggleQ = { i ->
@@ -737,6 +832,10 @@ private fun App() {
                 },
                 onMode = { mode = it },
                 onChangeSettings = { settings = it; store.saveSettings(it) },
+                onResetThreeCorrect = {
+                    store.clearThreeCorrectProgress(makeThreeCorrectKey(settings.reverse))
+                    fieldError = "累積回数をリセットしました。"
+                },
                 onExportWeb = {
                     pendingWebExport = buildWebDeckJson(deckName, notes)
                     webExportMessage = null
@@ -750,10 +849,12 @@ private fun App() {
                     if (mode == Mode.QUIZ) {
                         val builtConfig = createConfig(settings.gameMode)
                         if (builtConfig.items.isEmpty()) {
-                            fieldError = if (settings.gameMode == GameMode.WEAK_CHALLENGE) {
-                                "苦手語がまだありません。まず通常モードなどで問題を解いてください。"
-                            } else {
-                                "この組み合わせでは問題を作れませんでした。"
+                            fieldError = when (settings.gameMode) {
+                                GameMode.WEAK_CHALLENGE ->
+                                    "苦手語がまだありません。まず通常モードなどで問題を解いてください。"
+                                GameMode.THREE_CORRECT ->
+                                    "この設定では、すべてのカードが累積3回正解に到達しています。"
+                                else -> "この組み合わせでは問題を作れませんでした。"
                             }
                         } else {
                             config = builtConfig
@@ -779,6 +880,11 @@ private fun App() {
             val currentConfig = config!!
             QuizScreen(
                 config = currentConfig,
+                onThreeCorrectProgressChanged = { noteId, count ->
+                    currentConfig.threeCorrectKey?.let { key ->
+                        store.updateThreeCorrectProgress(key, noteId, count)
+                    }
+                },
                 onFinish = { result -> recordAndFinish(result, currentConfig) },
                 onQuit = { stage = Stage.DECKS },
             )
@@ -804,8 +910,10 @@ private fun App() {
                 historyRecorded = lastHistoryRecorded,
                 masteredCount = lastMasteredCount,
                 missedCount = missed.size,
+                threeCorrectCompleted = lastThreeCorrectCompleted,
+                threeCorrectTotal = lastThreeCorrectTotal,
                 onRetry = {
-                    config = if (finishedConfig.gameMode == GameMode.MASTERY) {
+                    val nextConfig = if (finishedConfig.gameMode == GameMode.MASTERY) {
                         createConfig(
                             gameMode = GameMode.MASTERY,
                             fixedItems = finishedConfig.items,
@@ -814,8 +922,18 @@ private fun App() {
                     } else {
                         createConfig(finishedConfig.gameMode, reverse = finishedConfig.reverse)
                     }
-                    round++
-                    stage = Stage.QUIZ
+                    if (nextConfig.items.isEmpty()) {
+                        fieldError = if (finishedConfig.gameMode == GameMode.THREE_CORRECT) {
+                            "この設定では、すべてのカードが累積3回正解に到達しています。"
+                        } else {
+                            "この組み合わせでは問題を作れませんでした。"
+                        }
+                        stage = Stage.FIELDS
+                    } else {
+                        config = nextConfig
+                        round++
+                        stage = Stage.QUIZ
+                    }
                 },
                 onRetryMissed = {
                     config = createConfig(
@@ -935,8 +1053,30 @@ private fun AttemptCountField(value: Int, onChange: (Int) -> Unit) {
 }
 
 @Composable
-private fun SettingsScreen(settings: Settings, onChange: (Settings) -> Unit, onBack: () -> Unit) {
+private fun SettingsScreen(
+    settings: Settings,
+    onChange: (Settings) -> Unit,
+    onResetThreeCorrectAll: () -> Unit,
+    onBack: () -> Unit,
+) {
     BackHandler { onBack() }
+    var showResetThreeCorrectConfirm by remember { mutableStateOf(false) }
+    if (showResetThreeCorrectConfirm) {
+        AlertDialog(
+            onDismissRequest = { showResetThreeCorrectConfirm = false },
+            title = { Text("3回正解の進捗をリセット") },
+            text = { Text("すべてのデッキ・フィールド・出題方向の累積正解数を削除します。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onResetThreeCorrectAll()
+                    showResetThreeCorrectConfirm = false
+                }) { Text("リセット") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetThreeCorrectConfirm = false }) { Text("キャンセル") }
+            },
+        )
+    }
     Column(modifier = Modifier.fillMaxSize().padding(20.dp).verticalScroll(rememberScrollState())) {
         Text("設定", fontSize = 24.sp, fontWeight = FontWeight.Bold)
 
@@ -975,6 +1115,19 @@ private fun SettingsScreen(settings: Settings, onChange: (Settings) -> Unit, onB
         ChipRow("めくりモード：1枚の表示時間",
             listOf("2秒" to 20, "3秒" to 30, "5秒" to 50, "8秒" to 80),
             settings.flashcardDeci) { onChange(settings.copy(flashcardDeci = it)) }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+        Text("3回正解モード", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+        Text(
+            "累積正解数はデッキ・フィールド・出題方向ごとに保存されます。",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = { showResetThreeCorrectConfirm = true },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("すべての累積回数をリセット") }
 
         Spacer(Modifier.height(24.dp))
         Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("もどる") }
@@ -1153,17 +1306,36 @@ private fun FieldScreen(
     mode: Mode,
     settings: Settings,
     dailyCompleted: Boolean,
+    threeCorrectSummary: Pair<Int, Int>?,
     error: String?,
     exportMessage: String?,
     onToggleQ: (Int) -> Unit,
     onToggleA: (Int) -> Unit,
     onMode: (Mode) -> Unit,
     onChangeSettings: (Settings) -> Unit,
+    onResetThreeCorrect: () -> Unit,
     onExportWeb: () -> Unit,
     onStart: () -> Unit,
     onBack: () -> Unit,
 ) {
     BackHandler { onBack() }
+    var showResetCurrentConfirm by remember { mutableStateOf(false) }
+    if (showResetCurrentConfirm) {
+        AlertDialog(
+            onDismissRequest = { showResetCurrentConfirm = false },
+            title = { Text("この設定の進捗をリセット") },
+            text = { Text("このデッキ・フィールド・出題方向の累積正解数を削除します。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onResetThreeCorrect()
+                    showResetCurrentConfirm = false
+                }) { Text("リセット") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetCurrentConfirm = false }) { Text("キャンセル") }
+            },
+        )
+    }
     fun preview(i: Int, value: String): String {
         val text = cleanText(value).replace("\n", " ⏎ ")
         val body = if (text.length > 24) text.take(24) + "…" else text
@@ -1206,7 +1378,7 @@ private fun FieldScreen(
                     GameMode.NORMAL -> "設定した問題数を解きます。"
                     GameMode.SURVIVAL -> "3回間違えるまで、問題を繰り返し出題します。"
                     GameMode.TIME_ATTACK -> "60秒が終わるまで出題します。正解で時間が増えます。"
-                    GameMode.THREE_CORRECT -> "各カードを合計3回正解すると出題対象から外れます。全カード達成まで続きます。"
+                    GameMode.THREE_CORRECT -> "過去のプレイを含め、正解で+1、不正解で-1。累積3回に到達したカードは以後出題しません。"
                     GameMode.WEAK_CHALLENGE -> "苦手度が高い語を最大10語出題します。"
                     GameMode.DAILY -> "今日固定の10問です。正式記録は1日1回です。"
                     GameMode.MASTERY -> "間違えた語を全て正解するまで繰り返します。"
@@ -1221,6 +1393,20 @@ private fun FieldScreen(
                     color = ComboOrange,
                     modifier = Modifier.padding(top = 4.dp),
                 )
+            }
+            if (settings.gameMode == GameMode.THREE_CORRECT && threeCorrectSummary != null) {
+                val (completed, total) = threeCorrectSummary
+                Text(
+                    "累積達成 $completed/$total",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (total > 0 && completed >= total) CorrectGreen
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+                TextButton(onClick = { showResetCurrentConfirm = true }) {
+                    Text("この設定の累積回数をリセット")
+                }
             }
 
             ChipRow(
@@ -1313,7 +1499,11 @@ private fun FieldScreen(
 
         if (error != null) {
             Spacer(Modifier.height(12.dp))
-            Text(error, color = WrongRed, fontSize = 13.sp)
+            Text(
+                error,
+                color = if (error.startsWith("累積回数をリセット")) CorrectGreen else WrongRed,
+                fontSize = 13.sp,
+            )
         }
 
         Spacer(Modifier.height(24.dp))
@@ -1330,6 +1520,7 @@ private enum class Phase { ASKING, FEEDBACK }
 @Composable
 private fun QuizScreen(
     config: RoundConfig,
+    onThreeCorrectProgressChanged: (Long, Int) -> Unit,
     onFinish: (RoundResult) -> Unit,
     onQuit: () -> Unit,
 ) {
@@ -1351,7 +1542,11 @@ private fun QuizScreen(
     val threeCorrectQueue = remember {
         mutableStateListOf<QuizItem>().apply { addAll(baseItems.shuffled()) }
     }
-    val threeCorrectCounts = remember { mutableStateMapOf<Long, Int>() }
+    val threeCorrectCounts = remember {
+        mutableStateMapOf<Long, Int>().apply {
+            putAll(config.initialThreeCorrectCounts.mapValues { it.value.coerceIn(0, THREE_CORRECT_TARGET) })
+        }
+    }
     var index by remember { mutableIntStateOf(0) }
     var questionSerial by remember { mutableIntStateOf(0) }
     var attemptNumber by remember { mutableIntStateOf(1) }
@@ -1501,7 +1696,9 @@ private fun QuizScreen(
             score += lastGained
             if (isThreeCorrect) {
                 val current = threeCorrectCounts[item.noteId] ?: 0
-                threeCorrectCounts[item.noteId] = (current + 1).coerceAtMost(THREE_CORRECT_TARGET)
+                val updated = (current + 1).coerceAtMost(THREE_CORRECT_TARGET)
+                threeCorrectCounts[item.noteId] = updated
+                onThreeCorrectProgressChanged(item.noteId, updated)
             }
             if (isTimeAttack) {
                 val comboTimeBonus = if (combo % 5 == 0) 2 else 0
@@ -1513,6 +1710,12 @@ private fun QuizScreen(
             lastGained = 0
             lastTimeBonus = 0
             if (isSurvival) lives -= 1
+            if (isThreeCorrect) {
+                val current = threeCorrectCounts[item.noteId] ?: 0
+                val updated = (current - 1).coerceAtLeast(0)
+                threeCorrectCounts[item.noteId] = updated
+                onThreeCorrectProgressChanged(item.noteId, updated)
+            }
         }
         lastCorrect = correct
         logs.add(AnswerLog(item, correct, recorded))
@@ -1592,7 +1795,7 @@ private fun QuizScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 isThreeCorrect -> Text(
-                    "残り ${threeCorrectQueue.size}語・達成 ${threeCorrectCounts.values.sum()}/${baseItems.size * THREE_CORRECT_TARGET}",
+                    "残り ${threeCorrectQueue.size}語・累積 ${threeCorrectCounts.values.sum()}/${baseItems.size * THREE_CORRECT_TARGET}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 else -> Text(
@@ -1706,7 +1909,7 @@ private fun QuizScreen(
                         val currentCorrect = threeCorrectCounts[item.noteId] ?: 0
                         Text(
                             if (currentCorrect >= THREE_CORRECT_TARGET) {
-                                "このカードは3回正解：卒業"
+                                "累積3回正解：以後は出題されません"
                             } else {
                                 "このカードの正解回数 $currentCorrect/$THREE_CORRECT_TARGET"
                             },
@@ -1897,6 +2100,8 @@ private fun ResultScreen(
     historyRecorded: Boolean,
     masteredCount: Int,
     missedCount: Int,
+    threeCorrectCompleted: Int,
+    threeCorrectTotal: Int,
     onRetry: () -> Unit,
     onRetryMissed: () -> Unit,
     onDecks: () -> Unit,
@@ -1970,9 +2175,14 @@ private fun ResultScreen(
         }
         if (gameMode == GameMode.THREE_CORRECT) {
             Spacer(Modifier.height(8.dp))
+            val allCompleted = threeCorrectTotal > 0 && threeCorrectCompleted >= threeCorrectTotal
             Text(
-                "すべてのカードで3回正解しました。",
-                color = CorrectGreen,
+                if (allCompleted) {
+                    "この設定の全カードが累積3回正解に到達しました。"
+                } else {
+                    "累積達成 $threeCorrectCompleted/$threeCorrectTotal"
+                },
+                color = if (allCompleted) CorrectGreen else MaterialTheme.colorScheme.onSurfaceVariant,
                 fontWeight = FontWeight.Bold,
             )
         }
