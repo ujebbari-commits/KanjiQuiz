@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.16";
+const APP_VERSION = "0.1.17";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -2229,14 +2229,8 @@ function updateQuizHeaderUi(session) {
   const retry = document.getElementById("quiz-retry");
   const score = document.getElementById("quiz-score");
   if (!status) return;
-  if (session.isDailyTime) {
-    status.textContent = session.config.showDailyOverallTimer
-      ? `デイリー 残り ${Math.ceil(session.globalRemaining)}秒・${session.logs.length}問`
-      : `デイリー（時間制）・${session.logs.length}問`;
-  }
-  else if (session.isDailyCount) {
-    const completed = session.logs.filter(log => log.correct).length;
-    status.textContent = `デイリー ${Math.min(completed, session.config.dailyTargetValue)} / ${session.config.dailyTargetValue}枚`;
+  if (session.isDailyTime || session.isDailyCount) {
+    status.textContent = `デイリー・回答 ${session.logs.length}問`;
   }
   else if (session.isTimeAttack) status.textContent = `残り ${Math.ceil(session.globalRemaining)}秒・${session.logs.length}問`;
   else if (session.isSurvival) status.textContent = `${"❤".repeat(Math.max(0, session.lives))}${"♡".repeat(Math.max(0, 3 - session.lives))}・${session.logs.length}問`;

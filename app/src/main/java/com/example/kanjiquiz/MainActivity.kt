@@ -101,7 +101,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.15"
+private const val APP_VERSION = "1.16"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -2730,19 +2730,10 @@ private fun QuizScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             when {
-                isDailyTime -> Text(
-                    if (config.showDailyOverallTimer) {
-                        "デイリー 残り ${globalRemaining.roundToInt()}秒・${logs.size}問"
-                    } else {
-                        "デイリー（時間制）・${logs.size}問"
-                    },
+                isDailyTime || isDailyCount -> Text(
+                    "デイリー・回答 ${logs.size}問",
                     fontWeight = FontWeight.Bold,
-                    color = if (config.showDailyOverallTimer && globalRemaining < 60f) ComboOrange
-                    else MaterialTheme.colorScheme.onSurface,
-                )
-                isDailyCount -> Text(
-                    "デイリー ${logs.count { it.correct }.coerceAtMost(config.dailyTargetValue)} / ${config.dailyTargetValue}枚",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
                 isTimeAttack -> Text(
                     "残り ${globalRemaining.roundToInt()}秒・${logs.size}問",
