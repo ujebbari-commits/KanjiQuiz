@@ -100,7 +100,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.10"
+private const val APP_VERSION = "1.11"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -1436,17 +1436,11 @@ private fun DeckScreen(
                     TextButton(onClick = onDailySettings) { Text("設定") }
                 }
                 Button(
-                    onClick = onDailyStart,
+                    onClick = onDailySettings,
                     enabled = !dailyCompleted,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(
-                        when {
-                            !dailyConfigured -> "デイリー設定を開く"
-                            dailyCompleted -> "今日は完了済み"
-                            else -> "デイリーチャレンジを始める"
-                        }
-                    )
+                    Text(if (dailyCompleted) "今日は完了済み" else "設定して始める")
                 }
                 if (dailyMessage != null) {
                     Text(
@@ -2381,6 +2375,7 @@ private fun QuizScreen(
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0 && !reverse && phase == Phase.ASKING
     val questionScrollState = rememberScrollState()
     var lastCorrect by remember { mutableStateOf(false) }
+    var lastWasManualPass by remember { mutableStateOf(false) }
     var lastGained by remember { mutableIntStateOf(0) }
     var lastTimeBonus by remember { mutableIntStateOf(0) }
     var score by remember { mutableIntStateOf(0) }
@@ -2403,7 +2398,7 @@ private fun QuizScreen(
     }
 
     val item = when {
-        isMastery -> masteryQueue.first()
+        isMastery || isDailyCount -> masteryQueue.first()
         isThreeCorrect -> threeCorrectQueue.first()
         else -> cycleItems[index]
     }
@@ -2425,7 +2420,7 @@ private fun QuizScreen(
                 durationSec = durationSec,
                 dailyGoalCompleted = when {
                     isDailyTime -> globalRemaining <= 0f
-                    isDailyCount -> logs.size >= config.dailyTargetValue
+                    isDailyCount -> logs.count { it.correct } >= config.dailyTargetValue
                     else -> true
                 },
             )
@@ -2437,6 +2432,7 @@ private fun QuizScreen(
         attemptNumber = 1
         retryNotice = null
         input = ""
+        lastWasManualPass = false
         remaining = limit
         lastTimeBonus = 0
         phase = Phase.ASKING
@@ -2483,13 +2479,13 @@ private fun QuizScreen(
             return
         }
 
-        if (isMastery) {
-            if (lastCorrect && masteryQueue.size == 1) {
+        if (isMastery || isDailyCount) {
+            val answered = masteryQueue.removeAt(0)
+            if (!lastCorrect) masteryQueue.add(answered)
+            if (masteryQueue.isEmpty()) {
                 finish()
                 return
             }
-            val answered = masteryQueue.removeAt(0)
-            if (!lastCorrect) masteryQueue.add(answered)
             resetForNextQuestion()
             return
         }
@@ -2552,7 +2548,7 @@ private fun QuizScreen(
         }
     }
 
-    fun judge(correct: Boolean, recorded: String) {
+    fun judge(correct: Boolean, recorded: String, manualPass: Boolean = false) {
         if (phase != Phase.ASKING || ended) return
 
         val canRetry = !correct && recorded.isNotBlank() && attemptNumber < maxAttempts
@@ -2563,6 +2559,7 @@ private fun QuizScreen(
         }
 
         retryNotice = null
+        lastWasManualPass = manualPass
         if (correct) {
             combo++
             maxCombo = maxOf(maxCombo, combo)
@@ -2613,7 +2610,7 @@ private fun QuizScreen(
     }
 
     fun passQuestion() {
-        judge(false, "")
+        judge(false, "", manualPass = true)
         focusManager.clearFocus(force = true)
     }
 
@@ -2648,7 +2645,7 @@ private fun QuizScreen(
                 }
                 if (!ended && remaining <= 0f && phase == Phase.ASKING) judge(false, "")
             }
-        } else if (config.autoAdvance) {
+        } else if (config.autoAdvance && !lastWasManualPass) {
             var waitDeci = config.feedbackDeci
             while (waitDeci > 0 && !ended && phase == Phase.FEEDBACK) {
                 delay(100)
@@ -2690,7 +2687,7 @@ private fun QuizScreen(
                     else MaterialTheme.colorScheme.onSurface,
                 )
                 isDailyCount -> Text(
-                    "デイリー ${logs.size.coerceAtMost(config.dailyTargetValue)} / ${config.dailyTargetValue}枚",
+                    "デイリー ${logs.count { it.correct }.coerceAtMost(config.dailyTargetValue)} / ${config.dailyTargetValue}枚",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 isTimeAttack -> Text(
@@ -2771,7 +2768,7 @@ private fun QuizScreen(
             isDailyCount -> LinearProgressIndicator(
                 progress = {
                     if (config.dailyTargetValue <= 0) 0f
-                    else (logs.size.toFloat() / config.dailyTargetValue).coerceIn(0f, 1f)
+                    else (logs.count { it.correct }.toFloat() / config.dailyTargetValue).coerceIn(0f, 1f)
                 },
                 modifier = Modifier.fillMaxWidth().height(if (keyboardVisible) 5.dp else 8.dp),
             )
@@ -2913,7 +2910,7 @@ private fun QuizScreen(
                     }
                 }
                 TextButton(
-                    onClick = { judge(false, "") },
+                    onClick = { passQuestion() },
                     modifier = Modifier.align(Alignment.End),
                 ) {
                     Text("パス →")
@@ -2954,14 +2951,14 @@ private fun QuizScreen(
         } else {
             val finishesAfterFeedback = when {
                 isSurvival && lives <= 0 -> true
-                isMastery && lastCorrect && masteryQueue.size == 1 -> true
+                (isMastery || isDailyCount) && lastCorrect && masteryQueue.size == 1 -> true
                 isThreeCorrect && lastCorrect &&
                     (threeCorrectCounts[item.noteId] ?: 0) >= THREE_CORRECT_TARGET &&
                     threeCorrectQueue.size == 1 -> true
                 config.sharedThreeCorrectAllModes &&
                     (threeCorrectCounts[item.noteId] ?: 0) >= THREE_CORRECT_TARGET &&
                     activeCyclePool().isEmpty() -> true
-                !isCycling && !isMastery && !isThreeCorrect && index + 1 >= cycleItems.size -> true
+                !isCycling && !isMastery && !isDailyCount && !isThreeCorrect && index + 1 >= cycleItems.size -> true
                 else -> false
             }
             Button(onClick = { goNext() }, modifier = Modifier.fillMaxWidth()) {

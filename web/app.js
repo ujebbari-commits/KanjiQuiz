@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.8";
+const APP_VERSION = "0.1.9";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -831,7 +831,7 @@ function renderHome() {
           <button class="btn btn-ghost" id="daily-settings" type="button">設定</button>
         </div>
         <button class="btn btn-primary btn-wide" id="daily-start" type="button" ${dailyDone ? "disabled" : ""}>
-          ${dailyConfigured ? (dailyDone ? "今日は完了済み" : "デイリーチャレンジを始める") : "デイリー設定を開く"}
+          ${dailyDone ? "今日は完了済み" : "設定して始める"}
         </button>
         <div id="daily-home-error"></div>
       </section>
@@ -842,20 +842,7 @@ function renderHome() {
   `);
 
   document.getElementById("daily-settings").addEventListener("click", () => navigate("dailySettings"));
-  document.getElementById("daily-start").addEventListener("click", () => {
-    if (!dailyConfigured) return navigate("dailySettings");
-    const config = createDailyRoundConfig(settings, { ...daily, deckIds: validDailyDecks.map(deck => String(deck.id)) });
-    if (!config.items.length) {
-      const message = config.errorMessage || (settings.newOnly
-        ? "デイリー対象に新規カードがありません。"
-        : settings.sharedThreeCorrectAllModes
-          ? "デイリー対象のカードはすべて成功3回に到達しています。"
-          : "デイリーデッキから出題できるカードを作れませんでした。");
-      document.getElementById("daily-home-error").innerHTML = `<div class="error">${escapeHtml(message)}</div>`;
-      return;
-    }
-    startQuiz(config);
-  });
+  document.getElementById("daily-start").addEventListener("click", () => navigate("dailySettings"));
 
   document.querySelectorAll("[data-open-deck]").forEach(button => {
     button.addEventListener("click", () => {
@@ -1517,6 +1504,7 @@ class QuizSession {
     this.globalRemaining = this.globalLimit;
     this.phase = "ASKING";
     this.lastCorrect = false;
+    this.lastWasManualPass = false;
     this.lastGained = 0;
     this.lastTimeBonus = 0;
     this.score = 0;
@@ -1544,7 +1532,7 @@ class QuizSession {
   get perQuestionTimer() { return !this.isTimeAttack && this.config.timeLimitSec > 0; }
 
   get item() {
-    if (this.isMastery) return this.masteryQueue[0];
+    if (this.isMastery || this.isDailyCount) return this.masteryQueue[0];
     if (this.isThreeCorrect) return this.threeCorrectQueue[0];
     return this.cycleItems[this.index];
   }
@@ -1621,6 +1609,7 @@ class QuizSession {
     this.questionSerial += 1;
     this.attemptNumber = 1;
     this.retryNotice = "";
+    this.lastWasManualPass = false;
     this.remaining = this.config.timeLimitSec;
     this.lastTimeBonus = 0;
     this.phase = "ASKING";
@@ -1659,7 +1648,7 @@ class QuizSession {
     return next;
   }
 
-  judge(correct, recorded) {
+  judge(correct, recorded, manualPass = false) {
     if (this.phase !== "ASKING" || this.ended) return;
     const canRetry = !correct && String(recorded).trim() && this.attemptNumber < this.config.maxAttempts;
     if (canRetry) {
@@ -1669,6 +1658,7 @@ class QuizSession {
     }
 
     this.retryNotice = "";
+    this.lastWasManualPass = manualPass;
     if (correct) {
       this.combo += 1;
       this.maxCombo = Math.max(this.maxCombo, this.combo);
@@ -1697,7 +1687,7 @@ class QuizSession {
     this.lastCorrect = correct;
     this.logs.push({ item: this.item, correct, input: recorded });
     this.phase = "FEEDBACK";
-    this.feedbackDeadline = performance.now() + this.config.feedbackDeci * 100;
+    this.feedbackDeadline = manualPass ? null : performance.now() + this.config.feedbackDeci * 100;
     renderQuizFeedback(this);
   }
 
@@ -1705,7 +1695,7 @@ class QuizSession {
     if (this.phase !== "FEEDBACK" || this.ended) return;
     if (this.isSurvival && this.lives <= 0) return finishQuiz(this);
 
-    if (this.isMastery) {
+    if (this.isMastery || this.isDailyCount) {
       const answered = this.masteryQueue.shift();
       if (!this.lastCorrect) this.masteryQueue.push(answered);
       if (!this.masteryQueue.length) return finishQuiz(this);
@@ -1883,7 +1873,7 @@ function renderQuizQuestion(session) {
     });
     setTimeout(() => input.focus({ preventScroll: true }), 50);
   }
-  bindImmediateQuizAction(document.getElementById("pass-question"), () => session.judge(false, ""));
+  bindImmediateQuizAction(document.getElementById("pass-question"), () => session.judge(false, "", true));
   installSelectionPause(session);
   updateQuizTimerUi(session);
 }
@@ -1928,14 +1918,14 @@ function renderQuizFeedback(session) {
 
 function shouldFinishAfterFeedback(session) {
   if (session.isSurvival && session.lives <= 0) return true;
-  if (session.isMastery && session.lastCorrect && session.masteryQueue.length === 1) return true;
+  if ((session.isMastery || session.isDailyCount) && session.lastCorrect && session.masteryQueue.length === 1) return true;
   if (session.isThreeCorrect && session.lastCorrect &&
       session.getThreeCorrectCount(session.item) >= THREE_CORRECT_TARGET &&
       session.threeCorrectQueue.length === 1) return true;
   if (session.config.sharedThreeCorrectAllModes &&
       session.getThreeCorrectCount(session.item) >= THREE_CORRECT_TARGET &&
       session.activeCyclePool().length === 0) return true;
-  if (!session.isCycling && !session.isMastery && !session.isThreeCorrect && session.index + 1 >= session.cycleItems.length) return true;
+  if (!session.isCycling && !session.isMastery && !session.isDailyCount && !session.isThreeCorrect && session.index + 1 >= session.cycleItems.length) return true;
   return false;
 }
 
@@ -1947,7 +1937,10 @@ function updateQuizHeaderUi(session) {
   const score = document.getElementById("quiz-score");
   if (!status) return;
   if (session.isDailyTime) status.textContent = `デイリー 残り ${Math.ceil(session.globalRemaining)}秒・${session.logs.length}問`;
-  else if (session.isDailyCount) status.textContent = `デイリー ${Math.min(session.logs.length, session.config.dailyTargetValue)} / ${session.config.dailyTargetValue}枚`;
+  else if (session.isDailyCount) {
+    const completed = session.logs.filter(log => log.correct).length;
+    status.textContent = `デイリー ${Math.min(completed, session.config.dailyTargetValue)} / ${session.config.dailyTargetValue}枚`;
+  }
   else if (session.isTimeAttack) status.textContent = `残り ${Math.ceil(session.globalRemaining)}秒・${session.logs.length}問`;
   else if (session.isSurvival) status.textContent = `${"❤".repeat(Math.max(0, session.lives))}${"♡".repeat(Math.max(0, 3 - session.lives))}・${session.logs.length}問`;
   else if (session.isMastery) status.textContent = `残り ${session.masteryQueue.length}語`;
@@ -1971,8 +1964,9 @@ function updateQuizTimerUi(session) {
     const percent = Math.max(0, Math.min(100, (session.globalRemaining / session.globalLimit) * 100));
     container.innerHTML = `<div class="progress ${session.globalRemaining < 60 ? "danger" : ""}"><div style="width:${percent}%"></div></div>`;
   } else if (session.isDailyCount) {
+    const completed = session.logs.filter(log => log.correct).length;
     const percent = session.config.dailyTargetValue > 0
-      ? Math.max(0, Math.min(100, (session.logs.length / session.config.dailyTargetValue) * 100))
+      ? Math.max(0, Math.min(100, (completed / session.config.dailyTargetValue) * 100))
       : 0;
     container.innerHTML = `<div class="progress"><div style="width:${percent}%"></div></div>`;
   } else if (session.isTimeAttack) {
@@ -2025,7 +2019,7 @@ function finishQuiz(session) {
     dailyGoalCompleted: session.config.gameMode !== "DAILY" ||
       (session.isDailyTime
         ? session.globalRemaining <= 0
-        : session.logs.length >= session.config.dailyTargetValue)
+        : session.logs.filter(log => log.correct).length >= session.config.dailyTargetValue)
   });
   state.lastResult = result;
   state.quiz = null;

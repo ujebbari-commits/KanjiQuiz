@@ -59,7 +59,7 @@ app/src/main/java/com/example/kanjiquiz/MainActivity.kt   ← 全ロジック
 
 1. 依頼者は本プロジェクトを GitHub リポジトリに push する（Termux の git 経由で設定済み）。
 2. push すると `.github/workflows/build.yml` が走り、`gradle assembleDebug` で **debug APK** をビルド。
-3. 成果物は Actions の Artifacts に `KanjiQuiz-v1.10-apk` という名前で上がる（パス `app/build/outputs/apk/debug/app-debug.apk`）。
+3. 成果物は Actions の Artifacts に `KanjiQuiz-v1.11-apk` という名前で上がる（パス `app/build/outputs/apk/debug/app-debug.apk`）。
 4. 依頼者はそれをダウンロードして端末にインストール。
 
 - リポジトリ: `https://github.com/ujebbari-commits/KanjiQuiz.git`（GitHubユーザー名 `ujebbari-commits`）
@@ -258,3 +258,17 @@ git add -A && git commit -m "update" && git push
 - 完了キーは日付、目標種別・値、対象デッキ、出題方向、新規のみ、全モード共通成功回数の設定を含む。
 - 未完了日はホームのデイリー領域を強調表示し、達成後は当日の開始ボタンを無効化する。
 - デイリー履歴のデッキ名は `デイリーデッキ`。カード成績と共通成功回数は元デッキのカードへ保存する。
+
+
+## v1.11 / Web v0.1.9 追加仕様
+
+### 枚数制デイリー
+- COUNT目標はログ総数ではなく、正解済みカード数で進捗と完了を判定する。
+- COUNTでは指定枚数のカードをキューとして持ち、正解カードは除外、不正解・パスカードは末尾へ戻す。全カードを正解すると完了する。
+
+### パス後の表示
+- 手動パスは不正解として記録し、正解面をフィードバック画面に表示する。
+- `autoAdvance` がオンでも手動パスだけは自動送りを抑止し、「次へ」を押すまで表示を維持する。時間切れは従来どおり自動送り対象。
+
+### ホームのデイリーボタン
+- 下部ボタン表示は「設定して始める」。クリックするとデイリー設定画面を開き、設定画面内の開始ボタンでラウンドを開始する。
