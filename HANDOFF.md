@@ -59,7 +59,7 @@ app/src/main/java/com/example/kanjiquiz/MainActivity.kt   ← 全ロジック
 
 1. 依頼者は本プロジェクトを GitHub リポジトリに push する（Termux の git 経由で設定済み）。
 2. push すると `.github/workflows/build.yml` が走り、`gradle assembleDebug` で **debug APK** をビルド。
-3. 成果物は Actions の Artifacts に `KanjiQuiz-v1.11-apk` という名前で上がる（パス `app/build/outputs/apk/debug/app-debug.apk`）。
+3. 成果物は Actions の Artifacts に `KanjiQuiz-v1.13-apk` という名前で上がる（パス `app/build/outputs/apk/debug/app-debug.apk`）。
 4. 依頼者はそれをダウンロードして端末にインストール。
 
 - リポジトリ: `https://github.com/ujebbari-commits/KanjiQuiz.git`（GitHubユーザー名 `ujebbari-commits`）
@@ -260,7 +260,7 @@ git add -A && git commit -m "update" && git push
 - デイリー履歴のデッキ名は `デイリーデッキ`。カード成績と共通成功回数は元デッキのカードへ保存する。
 
 
-## v1.11 / Web v0.1.9 追加仕様
+## v1.12 / Web v0.1.9 追加仕様
 
 ### 枚数制デイリー
 - COUNT目標はログ総数ではなく、正解済みカード数で進捗と完了を判定する。
@@ -272,3 +272,27 @@ git add -A && git commit -m "update" && git push
 
 ### ホームのデイリーボタン
 - 下部ボタン表示は「設定して始める」。クリックするとデイリー設定画面を開き、設定画面内の開始ボタンでラウンドを開始する。
+
+
+## Web v0.1.10 追加仕様
+
+- Firefox Androidのタッチ操作はpointerdownではなくpointerupで確定する。
+- pointer captureでキーボード閉鎖に伴うレイアウト移動の影響を受けないようにする。
+- 操作直後の同位置に発生する互換clickをキャプチャ段階で1回だけ破棄し、答え画面の「次へ」へのゴーストクリックを防止する。
+
+## Web v0.1.13 追加仕様
+
+### 既存デッキの更新取り込み
+- Web版のデッキ設定画面に「更新したデッキを再取り込み」を追加。
+- 更新対象の既存デッキIDを維持し、AnkiDroid JSON内のnoteIdが一致するカードの `cardStats`、`seenCards`、3回正解進捗をそのまま利用する。
+- 新規noteIdは進捗0として追加する。新JSONから消えたnoteIdはデッキ本体から外すが、localStorage上の進捗は削除しない。後日同じnoteIdが再追加された場合に復元される。
+- 保存前に一致、新規、内容変更、削除の件数を表示し、確認ダイアログを出す。
+- フィールド構成が変更された場合は、保存済み問題側・回答側フィールドと方向別3回正解プロファイルを同名フィールドへ移行する。
+- 安定したnoteIdを持たないCSV/TSV/配列JSONは更新取り込みを禁止する。Android版のWeb用JSONを使用する。
+
+
+## v1.13 / Web v0.1.14 追加仕様
+
+- デイリーチャレンジ中は、デイリー全体の進捗と各問の残り時間を別々のバーで同時表示する。
+- 時間制デイリーでは「今日のデイリー 残り○秒」と「現在の問題 残り○秒」を表示する。
+- 枚数制デイリーでも各問タイマーが有効なら「現在の問題」のバーを表示する。

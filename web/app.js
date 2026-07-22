@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.11";
+const APP_VERSION = "0.1.14";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -44,6 +44,8 @@ const state = {
   importFilename: "",
   importDraft: null,
   importError: "",
+  importMode: "new",
+  importTargetDeckId: "",
   quiz: null,
   flash: null,
   lastResult: null
@@ -291,7 +293,18 @@ function bumpStreak() {
 }
 
 function isDailyCompleted(key) {
-  return Boolean(readJson("kq.dailyCompleted", {})[key]);
+  const completed = readJson("kq.dailyCompleted", {});
+  if (Boolean(completed[key])) return true;
+
+  // v0.1.12以前は、目標値・対象デッキ・出題設定まで完了キーに含めていた。
+  // 新しい日付単位キーを確認するときだけ、当日の旧形式キーも完了として移行する。
+  if (String(key).includes("|daily-global-v3")) {
+    const legacyPrefix = `${todayKey()}|daily-v2|`;
+    return Object.entries(completed).some(([savedKey, value]) =>
+      Boolean(value) && savedKey.startsWith(legacyPrefix)
+    );
+  }
+  return false;
 }
 
 function markDailyCompleted(key) {
@@ -326,13 +339,10 @@ function saveDailyChallengeSettings(value) {
   });
 }
 
-function globalDailyKey(daily, settings) {
-  const target = daily.goalType === "TIME" ? daily.targetMinutes : daily.targetCount;
-  return [
-    todayKey(), "daily-v2", daily.goalType, target,
-    [...daily.deckIds].sort().join(","),
-    Boolean(settings.reverse), Boolean(settings.newOnly), Boolean(settings.sharedThreeCorrectAllModes)
-  ].join("|");
+function globalDailyKey(_daily, _settings) {
+  // デイリー完了は、その日の設定内容ではなく日付だけで保持する。
+  // 完了後に目標枚数・時間・対象デッキを変更しても、当日の完了状態は維持される。
+  return `${todayKey()}|daily-global-v3`;
 }
 
 function fieldPrefKey(deckId) {
@@ -515,6 +525,9 @@ function normalizeDeck(rawDeck, fallbackName = "インポートしたデッキ")
     ? rawDeck.fields.map((field, index) => cleanText(field) || `フィールド${index + 1}`)
     : inferFieldNames(rawDeck.notes || []);
   const notesInput = Array.isArray(rawDeck.notes) ? rawDeck.notes : [];
+  const hasStableNoteIds = notesInput.length > 0 && notesInput.every(note =>
+    !Array.isArray(note) && note && note.id != null && String(note.id).trim() !== ""
+  );
   const notes = notesInput.map((note, index) => {
     const rawFields = Array.isArray(note) ? note : Array.isArray(note.fields) ? note.fields : [];
     const padded = Array.from({ length: fields.length }, (_, fieldIndex) => String(rawFields[fieldIndex] ?? ""));
@@ -528,8 +541,105 @@ function normalizeDeck(rawDeck, fallbackName = "インポートしたデッキ")
     name: cleanText(rawDeck.name || fallbackName) || fallbackName,
     fields,
     notes,
+    importedAt: Date.now(),
+    _importHasStableNoteIds: hasStableNoteIds
+  };
+}
+
+function deckForStorage(deck, overrides = {}) {
+  return {
+    id: String(overrides.id ?? deck.id),
+    name: cleanText(overrides.name ?? deck.name) || "インポートしたデッキ",
+    fields: [...deck.fields],
+    notes: deck.notes.map(note => ({ id: String(note.id), fields: [...note.fields] })),
     importedAt: Date.now()
   };
+}
+
+function duplicateNoteIds(deck) {
+  const seen = new Set();
+  const duplicates = new Set();
+  for (const note of deck.notes) {
+    const id = String(note.id);
+    if (seen.has(id)) duplicates.add(id); else seen.add(id);
+  }
+  return [...duplicates];
+}
+
+function compareDeckUpdate(existingDeck, incomingDeck) {
+  const existingById = new Map(existingDeck.notes.map(note => [String(note.id), note]));
+  const incomingById = new Map(incomingDeck.notes.map(note => [String(note.id), note]));
+  let matched = 0;
+  let added = 0;
+  let changed = 0;
+  for (const [id, note] of incomingById) {
+    const existing = existingById.get(id);
+    if (!existing) {
+      added += 1;
+      continue;
+    }
+    matched += 1;
+    if (JSON.stringify(existing.fields) !== JSON.stringify(note.fields)) changed += 1;
+  }
+  let removed = 0;
+  for (const id of existingById.keys()) {
+    if (!incomingById.has(id)) removed += 1;
+  }
+  return {
+    matched,
+    added,
+    changed,
+    removed,
+    fieldStructureSame: JSON.stringify(existingDeck.fields) === JSON.stringify(incomingDeck.fields),
+    duplicates: duplicateNoteIds(incomingDeck)
+  };
+}
+
+function remapIndicesByFieldName(indices, oldFields, newFields) {
+  const mapped = [];
+  for (const index of indices || []) {
+    const name = oldFields[Number(index)];
+    const newIndex = name == null ? -1 : newFields.indexOf(name);
+    if (newIndex >= 0 && !mapped.includes(newIndex)) mapped.push(newIndex);
+  }
+  return mapped.sort((a, b) => a - b);
+}
+
+function migrateFieldPrefsForDeckUpdate(existingDeck, incomingDeck) {
+  const oldPrefs = loadFieldPrefs(existingDeck);
+  const qFields = remapIndicesByFieldName(oldPrefs.qFields, existingDeck.fields, incomingDeck.fields);
+  const aFields = remapIndicesByFieldName(oldPrefs.aFields, existingDeck.fields, incomingDeck.fields);
+  saveFieldPrefs(existingDeck.id, {
+    qFields: qFields.length ? qFields : [0],
+    aFields: aFields.length ? aFields : [incomingDeck.fields.length > 1 ? 1 : 0],
+    mode: oldPrefs.mode
+  });
+}
+
+function migrateThreeCorrectProfilesForDeckUpdate(existingDeck, incomingDeck) {
+  const root = readJson("kq.threeCorrectProgress", {});
+  const prefix = `v1|${existingDeck.id}|`;
+  let changed = false;
+  for (const [profileKey, profile] of Object.entries({ ...root })) {
+    if (!profileKey.startsWith(prefix)) continue;
+    const parts = profileKey.split("|");
+    if (parts.length < 5) continue;
+    const oldQ = parts[2] ? parts[2].split(",").filter(Boolean).map(Number) : [];
+    const oldA = parts[3] ? parts[3].split(",").filter(Boolean).map(Number) : [];
+    const newQ = remapIndicesByFieldName(oldQ, existingDeck.fields, incomingDeck.fields);
+    const newA = remapIndicesByFieldName(oldA, existingDeck.fields, incomingDeck.fields);
+    if (!newQ.length || !newA.length) continue;
+    const nextKey = `v1|${existingDeck.id}|${newQ.join(",")}|${newA.join(",")}|${parts[4]}`;
+    if (nextKey === profileKey) continue;
+    const target = root[nextKey] && typeof root[nextKey] === "object" ? { ...root[nextKey] } : {};
+    for (const [noteId, count] of Object.entries(profile || {})) {
+      target[noteId] = Math.max(Number(target[noteId]) || 0, Number(count) || 0);
+    }
+    root[nextKey] = target;
+    delete root[profileKey];
+    changed = true;
+  }
+  if (changed) writeJson("kq.threeCorrectProgress", root);
 }
 
 function inferFieldNames(notes) {
@@ -836,7 +946,7 @@ function renderHome() {
         </button>
         <div id="daily-home-error"></div>
       </section>
-      <button class="btn btn-primary btn-wide" type="button" data-nav="import">デッキを読み込む</button>
+      <button class="btn btn-primary btn-wide" id="open-import-new" type="button">デッキを読み込む</button>
       ${deckCards}
     </div>
     <div class="footer-note">カード文字は選択可能です。Firefox上でYomitanを直接利用できます。<br>Web v${APP_VERSION}</div>
@@ -844,6 +954,11 @@ function renderHome() {
 
   document.getElementById("daily-settings").addEventListener("click", () => navigate("dailySettings"));
   document.getElementById("daily-start").addEventListener("click", () => navigate("dailySettings"));
+
+  document.getElementById("open-import-new")?.addEventListener("click", () => {
+    resetImportState();
+    navigate("import");
+  });
 
   document.querySelectorAll("[data-open-deck]").forEach(button => {
     button.addEventListener("click", () => {
@@ -934,15 +1049,35 @@ function renderDailySettings() {
   });
 }
 
+function resetImportState(options = {}) {
+  state.importRaw = "";
+  state.importFilename = "";
+  state.importDraft = null;
+  state.importError = "";
+  state.importMode = options.mode === "update" ? "update" : "new";
+  state.importTargetDeckId = options.targetDeckId ? String(options.targetDeckId) : "";
+}
+
+function updateImportTargetSuggestion() {
+  if (state.importMode === "update" || state.importTargetDeckId || state.importDraft?.decks?.length !== 1) return;
+  const incoming = state.importDraft.decks[0];
+  const exactMatches = state.decks.filter(deck => deck.name === incoming.name);
+  if (exactMatches.length === 1) state.importTargetDeckId = String(exactMatches[0].id);
+}
+
 function renderImport() {
   const draft = state.importDraft;
+  const canUpdate = draft?.decks?.length === 1 && state.decks.length > 0;
+  const incomingDeck = canUpdate ? draft.decks[0] : null;
+  const targetDeck = state.decks.find(deck => String(deck.id) === String(state.importTargetDeckId));
+  const updateSummary = incomingDeck && targetDeck ? compareDeckUpdate(targetDeck, incomingDeck) : null;
   let preview = "";
   if (draft?.decks?.length) {
-    preview = draft.decks.map((deck, deckIndex) => `
+    preview = draft.decks.map(deck => `
       <div class="card stack">
         ${draft.decks.length === 1 ? `
           <label><span>デッキ名</span>
-            <input class="field" id="draft-deck-name" value="${escapeHtml(deck.name)}" maxlength="120">
+            <input class="field" id="draft-deck-name" value="${escapeHtml(state.importMode === "update" && targetDeck ? targetDeck.name : deck.name)}" maxlength="120">
           </label>` : `<strong>${escapeHtml(deck.name)}</strong>`}
         <div class="subtle">${deck.notes.length}枚・${deck.fields.length}フィールド</div>
         <div class="preview-wrap">
@@ -957,6 +1092,43 @@ function renderImport() {
       </div>`).join("");
   }
 
+  const updateOptions = state.decks.map(deck =>
+    `<option value="${escapeHtml(String(deck.id))}" ${String(deck.id) === String(state.importTargetDeckId) ? "selected" : ""}>${escapeHtml(deck.name)}（${deck.notes.length}枚）</option>`
+  ).join("");
+
+  const updatePanel = canUpdate ? `
+    <div class="card stack">
+      <strong>保存方法</strong>
+      <label class="row"><input type="radio" name="import-mode" value="new" ${state.importMode !== "update" ? "checked" : ""}><span>新しいデッキとして追加</span></label>
+      <label class="row"><input type="radio" name="import-mode" value="update" ${state.importMode === "update" ? "checked" : ""}><span>既存デッキを更新し、カードの進捗を維持</span></label>
+      ${state.importMode === "update" ? `
+        <label><span>更新する既存デッキ</span>
+          <select class="select" id="import-target-deck">
+            <option value="">選択してください</option>
+            ${updateOptions}
+          </select>
+        </label>
+        ${targetDeck && updateSummary ? `
+          <div class="notice stack">
+            <div><strong>更新内容</strong></div>
+            <div class="grid-2 small">
+              <div>進捗を維持する既存カード：${updateSummary.matched}枚</div>
+              <div>新しく追加するカード：${updateSummary.added}枚</div>
+              <div>内容が変わる既存カード：${updateSummary.changed}枚</div>
+              <div>新データから消えたカード：${updateSummary.removed}枚</div>
+            </div>
+            <div class="small">同じカードIDの成功回数・苦手度・出題済み状態を維持します。新規カードは進捗0から開始します。消えたカードの進捗は内部に残るため、同じIDで再追加すると復元されます。</div>
+            ${!updateSummary.fieldStructureSame ? `<div class="small">フィールド構成が変わっています。問題側・回答側の選択は同名フィールドへ自動移行します。</div>` : ""}
+            ${updateSummary.duplicates.length ? `<div class="error">同じカードIDが重複しています：${escapeHtml(updateSummary.duplicates.slice(0, 5).join(", "))}${updateSummary.duplicates.length > 5 ? "…" : ""}</div>` : ""}
+          </div>` : `<div class="subtle small">更新先を選ぶと、追加・変更・削除されるカード数を確認できます。</div>`}
+      ` : ""}
+    </div>` : "";
+
+  const updateUnsafe = state.importMode === "update" && incomingDeck && !incomingDeck._importHasStableNoteIds;
+  const confirmLabel = state.importMode === "update" && targetDeck
+    ? `「${escapeHtml(targetDeck.name)}」を更新`
+    : `${draft?.decks?.length || 0}デッキを保存`;
+
   app.innerHTML = shell("デッキを読み込む", `
     <div class="stack">
       <div class="card stack">
@@ -967,7 +1139,7 @@ function renderImport() {
           <input id="first-row-header" type="checkbox" checked>
           <span>先頭行をフィールド名として使う（CSV・TSV）</span>
         </label>
-        <div class="subtle small">AnkiDroidからはAndroid版v1.3の「Web版用JSONを保存」を使ってください。Anki Desktopのテキスト書き出しはTSVとして読み込めます。</div>
+        <div class="subtle small">AnkiDroidからはAndroid版の「Web版用JSONを保存」を使ってください。更新取り込みでは、AnkiDroid由来のカードIDを使って既存進捗を維持します。</div>
         ${state.importFilename ? `<div class="subtle small">選択中: ${escapeHtml(state.importFilename)}${state.importRaw ? `・読み取り済み ${new Blob([state.importRaw]).size}バイト` : ""}</div>` : ""}
       </div>
 
@@ -981,7 +1153,9 @@ function renderImport() {
 
       ${state.importError ? `<div class="error">${escapeHtml(state.importError)}</div>` : ""}
       ${preview}
-      ${draft?.decks?.length ? `<button class="btn btn-primary btn-wide" id="confirm-import" type="button">${draft.decks.length}デッキを保存</button>` : ""}
+      ${updatePanel}
+      ${updateUnsafe ? `<div class="error">このファイルには安定したカードIDがありません。CSV・TSVでは既存カードと新規カードを安全に判別できないため、更新取り込みはできません。Android版から書き出したJSONを使用してください。</div>` : ""}
+      ${draft?.decks?.length ? `<button class="btn btn-primary btn-wide" id="confirm-import" type="button" ${updateUnsafe ? "disabled" : ""}>${confirmLabel}</button>` : ""}
       <button class="btn btn-ghost btn-wide" type="button" data-nav="home">キャンセル</button>
     </div>
   `);
@@ -995,6 +1169,7 @@ function renderImport() {
       state.importRaw = await readSelectedFile(file);
       state.importDraft = parseImportText(state.importRaw, file.name, headerCheck.checked);
       state.importError = "";
+      updateImportTargetSuggestion();
     } catch (error) {
       state.importDraft = null;
       state.importError = `読み込みに失敗しました：${error.message}`;
@@ -1008,6 +1183,7 @@ function renderImport() {
     try {
       state.importDraft = parseImportText(state.importRaw, state.importFilename, headerCheck.checked);
       state.importError = "";
+      updateImportTargetSuggestion();
     } catch (error) {
       state.importDraft = null;
       state.importError = `解析に失敗しました：${error.message}`;
@@ -1022,9 +1198,25 @@ function renderImport() {
       state.importFilename = "sample-deck.json";
       state.importDraft = parseImportText(state.importRaw, state.importFilename, true);
       state.importError = "";
+      updateImportTargetSuggestion();
     } catch (error) {
       state.importError = `サンプルを読み込めませんでした：${error.message}`;
     }
+    renderImport();
+  });
+
+  document.querySelectorAll('input[name="import-mode"]').forEach(input => {
+    input.addEventListener("change", () => {
+      state.importMode = input.value === "update" ? "update" : "new";
+      if (state.importMode === "update" && !state.importTargetDeckId && state.decks.length === 1) {
+        state.importTargetDeckId = String(state.decks[0].id);
+      }
+      renderImport();
+    });
+  });
+
+  document.getElementById("import-target-deck")?.addEventListener("change", event => {
+    state.importTargetDeckId = event.target.value;
     renderImport();
   });
 
@@ -1033,16 +1225,30 @@ function renderImport() {
       if (state.importDraft.decks.length === 1) {
         state.importDraft.decks[0].name = cleanText(document.getElementById("draft-deck-name").value) || state.importDraft.decks[0].name;
       }
-      for (const deck of state.importDraft.decks) {
-        if (!deck.notes.length) throw new Error(`「${deck.name}」にカードがありません。`);
-        await dbPutDeck(deck);
+      if (state.importMode === "update") {
+        if (state.importDraft.decks.length !== 1) throw new Error("更新取り込みは1回につき1デッキのみ対応しています。");
+        const incoming = state.importDraft.decks[0];
+        const existing = state.decks.find(deck => String(deck.id) === String(state.importTargetDeckId));
+        if (!existing) throw new Error("更新する既存デッキを選択してください。");
+        if (!incoming._importHasStableNoteIds) throw new Error("カードIDがないため安全に更新できません。Android版から書き出したJSONを使用してください。");
+        const summary = compareDeckUpdate(existing, incoming);
+        if (summary.duplicates.length) throw new Error("同じカードIDが重複しているため更新できません。");
+        const message = `「${existing.name}」を更新します。\n\n進捗維持: ${summary.matched}枚\n新規追加: ${summary.added}枚\n内容変更: ${summary.changed}枚\nデッキから削除: ${summary.removed}枚\n\n既存の成功回数・苦手度・出題済み状態は維持されます。続行しますか？`;
+        if (!confirm(message)) return;
+        migrateThreeCorrectProfilesForDeckUpdate(existing, incoming);
+        migrateFieldPrefsForDeckUpdate(existing, incoming);
+        await dbPutDeck(deckForStorage(incoming, { id: existing.id }));
+      } else {
+        for (const deck of state.importDraft.decks) {
+          if (!deck.notes.length) throw new Error(`「${deck.name}」にカードがありません。`);
+          const idAlreadyExists = state.decks.some(existing => String(existing.id) === String(deck.id));
+          const storageId = state.importDraft.backup ? deck.id : (idAlreadyExists ? uid() : deck.id);
+          await dbPutDeck(deckForStorage(deck, { id: storageId }));
+        }
       }
       if (state.importDraft.backup?.appData) restoreAppData(state.importDraft.backup.appData);
       await refreshDecks();
-      state.importRaw = "";
-      state.importFilename = "";
-      state.importDraft = null;
-      state.importError = "";
+      resetImportState();
       navigate("home");
     } catch (error) {
       state.importError = `保存に失敗しました：${error.message}`;
@@ -1141,8 +1347,9 @@ function renderFields() {
       <button class="btn btn-primary btn-wide" id="start-game" type="button">スタート</button>
       <div class="grid-2">
         <button class="btn btn-ghost" id="export-deck" type="button">このデッキをJSON保存</button>
-        <button class="btn btn-danger" id="delete-deck" type="button">このデッキを削除</button>
+        <button class="btn btn-ghost" id="update-deck-import" type="button">更新したデッキを再取り込み</button>
       </div>
+      <button class="btn btn-danger btn-wide" id="delete-deck" type="button">このデッキを削除</button>
       <button class="btn btn-ghost btn-wide" type="button" data-nav="home">デッキ一覧へ</button>
     </div>
   `);
@@ -1261,6 +1468,11 @@ function renderFields() {
       version: 1,
       deck
     });
+  });
+
+  document.getElementById("update-deck-import").addEventListener("click", () => {
+    resetImportState({ mode: "update", targetDeckId: deck.id });
+    navigate("import");
   });
 
   document.getElementById("delete-deck").addEventListener("click", async () => {
@@ -1966,7 +2178,9 @@ function renderQuizFeedback(session) {
     </div>`;
 
   const finishAfter = shouldFinishAfterFeedback(session);
+  const imageSearchUrl = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(session.promptText.trim())}`;
   document.getElementById("quiz-controls").innerHTML = `
+    <a class="btn btn-ghost btn-wide" id="google-image-search" href="${escapeHtml(imageSearchUrl)}" target="_blank" rel="noopener noreferrer">Google画像で検索</a>
     <button class="btn btn-primary btn-wide" id="next-question" type="button">${finishAfter ? "結果を見る" : "次へ"}</button>`;
   document.getElementById("next-question").addEventListener("click", () => session.goNext());
   session.selectionPaused = false;
@@ -2017,24 +2231,40 @@ function updateQuizTimerUi(session) {
   updateQuizHeaderUi(session);
   const container = document.getElementById("quiz-progress");
   if (!container) return;
+
+  const rows = [];
   if (session.isDailyTime) {
     const percent = Math.max(0, Math.min(100, (session.globalRemaining / session.globalLimit) * 100));
-    container.innerHTML = `<div class="progress ${session.globalRemaining < 60 ? "danger" : ""}"><div style="width:${percent}%"></div></div>`;
+    rows.push(`
+      <div class="timer-row">
+        <div class="timer-label"><span>今日のデイリー</span><span>残り ${Math.ceil(session.globalRemaining)}秒</span></div>
+        <div class="progress daily-time-progress ${session.globalRemaining < 60 ? "danger" : ""}" role="progressbar" aria-label="デイリー全体の残り時間" aria-valuemin="0" aria-valuemax="${session.globalLimit}" aria-valuenow="${Math.ceil(session.globalRemaining)}"><div style="width:${percent}%"></div></div>
+      </div>`);
   } else if (session.isDailyCount) {
     const completed = session.logs.filter(log => log.correct).length;
     const percent = session.config.dailyTargetValue > 0
       ? Math.max(0, Math.min(100, (completed / session.config.dailyTargetValue) * 100))
       : 0;
-    container.innerHTML = `<div class="progress"><div style="width:${percent}%"></div></div>`;
+    rows.push(`
+      <div class="timer-row">
+        <div class="timer-label"><span>今日のデイリー</span><span>${Math.min(completed, session.config.dailyTargetValue)} / ${session.config.dailyTargetValue}枚</span></div>
+        <div class="progress" role="progressbar" aria-label="デイリー正解枚数" aria-valuemin="0" aria-valuemax="${session.config.dailyTargetValue}" aria-valuenow="${Math.min(completed, session.config.dailyTargetValue)}"><div style="width:${percent}%"></div></div>
+      </div>`);
   } else if (session.isTimeAttack) {
     const percent = Math.max(0, Math.min(100, (session.globalRemaining / TIME_ATTACK_SEC) * 100));
-    container.innerHTML = `<div class="progress ${session.globalRemaining < 10 ? "danger" : ""}"><div style="width:${percent}%"></div></div>`;
-  } else if (session.perQuestionTimer) {
-    const percent = Math.max(0, Math.min(100, (session.remaining / session.config.timeLimitSec) * 100));
-    container.innerHTML = `<div class="progress ${session.remaining < session.config.timeLimitSec * .3 ? "danger" : ""}"><div style="width:${percent}%"></div></div>`;
-  } else {
-    container.innerHTML = "";
+    rows.push(`<div class="progress ${session.globalRemaining < 10 ? "danger" : ""}"><div style="width:${percent}%"></div></div>`);
   }
+
+  const showQuestionTimer = session.perQuestionTimer && !session.isTimeAttack;
+  if (showQuestionTimer) {
+    const percent = Math.max(0, Math.min(100, (session.remaining / session.config.timeLimitSec) * 100));
+    const questionBar = `<div class="progress question-time-progress ${session.remaining < session.config.timeLimitSec * .3 ? "danger" : ""}" role="progressbar" aria-label="現在の問題の残り時間" aria-valuemin="0" aria-valuemax="${session.config.timeLimitSec}" aria-valuenow="${Math.ceil(session.remaining)}"><div style="width:${percent}%"></div></div>`;
+    rows.push(session.isDailyTime || session.isDailyCount
+      ? `<div class="timer-row"><div class="timer-label"><span>現在の問題</span><span>残り ${Math.ceil(session.remaining)}秒</span></div>${questionBar}</div>`
+      : questionBar);
+  }
+
+  container.innerHTML = rows.length ? `<div class="timer-stack">${rows.join("")}</div>` : "";
 }
 
 function showQuitQuizModal(session) {

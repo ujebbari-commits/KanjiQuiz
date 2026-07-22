@@ -160,6 +160,22 @@ th { background: var(--surface-2); }
 }
 .progress > div { height: 100%; background: var(--primary); transition: width .1s linear; }
 .progress.danger > div { background: var(--danger); }
+.daily-time-progress {
+  height: 13px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.timer-stack { display: grid; gap: 7px; }
+.timer-row { display: grid; gap: 3px; }
+.timer-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: .78rem;
+  line-height: 1.15;
+}
+.question-time-progress { height: 9px; }
 
 .prompt-area {
   flex: 1;
@@ -253,8 +269,14 @@ body.quiz-keyboard-active {
   min-width: 34px;
 }
 .quiz-shell.keyboard-active #quiz-progress .progress {
-  height: 5px;
+  height: 7px;
 }
+.quiz-shell.keyboard-active #quiz-progress .daily-time-progress {
+  height: 10px;
+}
+.quiz-shell.keyboard-active #quiz-progress .timer-stack { gap: 4px; }
+.quiz-shell.keyboard-active #quiz-progress .timer-row { gap: 2px; }
+.quiz-shell.keyboard-active #quiz-progress .timer-label { font-size: .68rem; }
 .quiz-shell.keyboard-active .prompt-area {
   flex: 1 1 auto;
   min-height: 0;

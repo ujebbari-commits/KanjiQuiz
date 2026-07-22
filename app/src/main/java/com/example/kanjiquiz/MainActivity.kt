@@ -2,6 +2,7 @@ package com.example.kanjiquiz
 
 import android.content.ContentResolver
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
@@ -100,7 +101,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.11"
+private const val APP_VERSION = "1.13"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -418,7 +419,24 @@ class Store(context: Context) {
 
     fun isDailyCompleted(key: String): Boolean {
         val raw = sp.getString("dailyCompleted", null) ?: return false
-        return runCatching { JSONObject(raw).optBoolean(key, false) }.getOrDefault(false)
+        return runCatching {
+            val completed = JSONObject(raw)
+            if (completed.optBoolean(key, false)) return@runCatching true
+
+            // v1.11以前は、目標値・対象デッキ・出題設定まで完了キーに含めていた。
+            // 新しい日付単位キーを確認するときだけ、当日の旧形式キーも完了として移行する。
+            if (key.contains("|daily-global-v3")) {
+                val legacyPrefix = "${todayKey()}|daily-v2|"
+                val keys = completed.keys()
+                while (keys.hasNext()) {
+                    val savedKey = keys.next()
+                    if (savedKey.startsWith(legacyPrefix) && completed.optBoolean(savedKey, false)) {
+                        return@runCatching true
+                    }
+                }
+            }
+            false
+        }.getOrDefault(false)
     }
 
     fun markDailyCompleted(key: String) {
@@ -708,14 +726,10 @@ private fun App() {
 
     fun makeSharedThreeCorrectKey(): String = "shared-v1|$deckName"
 
-    fun makeGlobalDailyKey(value: DailyChallengeSettings = dailySettings): String = buildString {
-        append(store.todayKey())
-        append("|daily-v2|").append(value.goalType.name)
-        append('|').append(if (value.goalType == DailyGoalType.COUNT) value.targetCount else value.targetMinutes)
-        append('|').append(value.deckNames.sorted().joinToString(","))
-        append('|').append(settings.reverse)
-        append('|').append(settings.newOnly)
-        append('|').append(settings.sharedThreeCorrectAllModes)
+    fun makeGlobalDailyKey(@Suppress("UNUSED_PARAMETER") value: DailyChallengeSettings = dailySettings): String {
+        // デイリー完了は、その日の設定内容ではなく日付だけで保持する。
+        // 完了後に目標枚数・時間・対象デッキを変更しても、当日の完了状態は維持される。
+        return "${store.todayKey()}|daily-global-v3"
     }
 
     fun startDailyChallenge() {
@@ -2336,6 +2350,7 @@ private fun QuizScreen(
     onFinish: (RoundResult) -> Unit,
     onQuit: () -> Unit,
 ) {
+    val context = LocalContext.current
     val baseItems = config.items
     val reverse = config.reverse
     val isTimeAttack = config.gameMode == GameMode.TIME_ATTACK
@@ -2759,25 +2774,61 @@ private fun QuizScreen(
             }
         }
         if (!keyboardVisible) Spacer(Modifier.height(4.dp))
-        when {
-            isDailyTime -> LinearProgressIndicator(
+        if (isDailyTime) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("今日のデイリー", fontSize = if (keyboardVisible) 10.sp else 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("残り ${globalRemaining.roundToInt()}秒", fontSize = if (keyboardVisible) 10.sp else 12.sp,
+                    color = if (globalRemaining < 60f) ComboOrange else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            LinearProgressIndicator(
                 progress = { (globalRemaining / globalLimit).coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth().height(if (keyboardVisible) 5.dp else 8.dp),
+                modifier = Modifier.fillMaxWidth().height(if (keyboardVisible) 8.dp else 11.dp),
                 color = if (globalRemaining < 60f) ComboOrange else MaterialTheme.colorScheme.primary,
             )
-            isDailyCount -> LinearProgressIndicator(
+        } else if (isDailyCount) {
+            val completedDailyCards = logs.count { it.correct }.coerceAtMost(config.dailyTargetValue)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("今日のデイリー", fontSize = if (keyboardVisible) 10.sp else 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("$completedDailyCards / ${config.dailyTargetValue}枚", fontSize = if (keyboardVisible) 10.sp else 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            LinearProgressIndicator(
                 progress = {
                     if (config.dailyTargetValue <= 0) 0f
-                    else (logs.count { it.correct }.toFloat() / config.dailyTargetValue).coerceIn(0f, 1f)
+                    else (completedDailyCards.toFloat() / config.dailyTargetValue).coerceIn(0f, 1f)
                 },
                 modifier = Modifier.fillMaxWidth().height(if (keyboardVisible) 5.dp else 8.dp),
             )
-            isTimeAttack -> LinearProgressIndicator(
+        } else if (isTimeAttack) {
+            LinearProgressIndicator(
                 progress = { (globalRemaining / TIME_ATTACK_SEC).coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth().height(if (keyboardVisible) 5.dp else 8.dp),
                 color = if (globalRemaining < 10f) WrongRed else MaterialTheme.colorScheme.primary,
             )
-            perQuestionTimer -> LinearProgressIndicator(
+        }
+
+        if (perQuestionTimer && !isTimeAttack) {
+            if (isDailyTime || isDailyCount) {
+                Spacer(Modifier.height(if (keyboardVisible) 3.dp else 6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("現在の問題", fontSize = if (keyboardVisible) 10.sp else 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("残り ${remaining.roundToInt()}秒", fontSize = if (keyboardVisible) 10.sp else 12.sp,
+                        color = if (remaining < limit * 0.3f) WrongRed else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            LinearProgressIndicator(
                 progress = { (remaining / limit).coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth().height(if (keyboardVisible) 5.dp else 8.dp),
                 color = if (remaining < limit * 0.3f) WrongRed
@@ -2961,6 +3012,18 @@ private fun QuizScreen(
                 !isCycling && !isMastery && !isDailyCount && !isThreeCorrect && index + 1 >= cycleItems.size -> true
                 else -> false
             }
+            OutlinedButton(
+                onClick = {
+                    val url = "https://www.google.com/search?tbm=isch&q=${Uri.encode(promptText)}"
+                    runCatching {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Google画像で検索")
+            }
+            Spacer(Modifier.height(8.dp))
             Button(onClick = { goNext() }, modifier = Modifier.fillMaxWidth()) {
                 Text(if (finishesAfterFeedback) "結果を見る" else "次へ")
             }
