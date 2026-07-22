@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.9";
+const APP_VERSION = "0.1.11";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -145,6 +145,7 @@ function applyGameFontStyle(element, value) {
 
 let quizViewportBaseline = 0;
 let quizInputFocused = false;
+let suppressedQuizClick = null;
 
 function currentQuizViewportHeight() {
   return Math.round(window.visualViewport?.height || window.innerHeight);
@@ -830,7 +831,7 @@ function renderHome() {
           </div>
           <button class="btn btn-ghost" id="daily-settings" type="button">設定</button>
         </div>
-        <button class="btn btn-primary btn-wide" id="daily-start" type="button" ${dailyDone ? "disabled" : ""}>
+        <button class="btn btn-primary btn-wide" id="daily-start" type="button" style="margin-top:10px" ${dailyDone ? "disabled" : ""}>
           ${dailyDone ? "今日は完了済み" : "設定して始める"}
         </button>
         <div id="daily-home-error"></div>
@@ -1801,24 +1802,80 @@ function renderQuiz() {
 }
 
 function bindImmediateQuizAction(button, action) {
-  let handledByPointerDown = false;
+  let activePointerId = null;
+  let startX = 0;
+  let startY = 0;
+  let moved = false;
+
   button.addEventListener("pointerdown", event => {
     if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
-    // Firefox Androidではblur→Viewport変更でclickが取り消されるため、
-    // レイアウトが動く前のpointerdownで処理する。
+    // Firefox Androidではボタンへフォーカスが移るとキーボードが閉じ、
+    // pointerup前にレイアウトが動く。既定動作を止め、同じボタンで
+    // pointerupを受け取ってから1回だけ処理する。
     event.preventDefault();
-    handledByPointerDown = true;
-    action();
-  });
-  button.addEventListener("click", event => {
-    if (handledByPointerDown) {
-      handledByPointerDown = false;
-      event.preventDefault();
-      return;
+    event.stopPropagation();
+    activePointerId = event.pointerId;
+    startX = event.clientX;
+    startY = event.clientY;
+    moved = false;
+    try {
+      button.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture未対応でも通常のpointerupで処理する。
     }
+  });
+
+  button.addEventListener("pointermove", event => {
+    if (event.pointerId !== activePointerId) return;
+    if (Math.hypot(event.clientX - startX, event.clientY - startY) > 18) moved = true;
+  });
+
+  button.addEventListener("pointerup", event => {
+    if (event.pointerId !== activePointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    activePointerId = null;
+    try {
+      button.releasePointerCapture(event.pointerId);
+    } catch {
+      // 既にDOMから外れている場合などは何もしない。
+    }
+    if (moved) return;
+
+    // pointerup後に生成される互換clickが、描画し直された「次へ」に
+    // 当たって二重処理されるのを防ぐ。
+    suppressedQuizClick = {
+      until: performance.now() + 450,
+      x: event.clientX,
+      y: event.clientY
+    };
     action();
   });
+
+  button.addEventListener("pointercancel", event => {
+    if (event.pointerId === activePointerId) activePointerId = null;
+  });
+
+  button.addEventListener("click", () => action());
 }
+
+// touch/pen操作の直後にブラウザーが生成する互換clickを、描画後の別ボタンへ
+// 誤送信しないよう、同じ位置の最初のclickだけをキャプチャ段階で破棄する。
+document.addEventListener("click", event => {
+  const guard = suppressedQuizClick;
+  if (!guard) return;
+  if (performance.now() > guard.until) {
+    suppressedQuizClick = null;
+    return;
+  }
+  const dx = Math.abs((Number.isFinite(event.clientX) ? event.clientX : guard.x) - guard.x);
+  const dy = Math.abs((Number.isFinite(event.clientY) ? event.clientY : guard.y) - guard.y);
+  if (dx <= 36 && dy <= 36) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    suppressedQuizClick = null;
+  }
+}, true);
 
 function renderQuizQuestion(session) {
   if (state.screen !== "quiz" || session.ended) return;
