@@ -100,7 +100,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.8"
+private const val APP_VERSION = "1.10"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -108,6 +108,7 @@ private const val THREE_CORRECT_TARGET = 3
 // ============================================================
 enum class GameMode { NORMAL, SURVIVAL, TIME_ATTACK, THREE_CORRECT, MASTERY, WEAK_CHALLENGE, DAILY }
 enum class Mode { QUIZ, FLASHCARD }
+enum class DailyGoalType { COUNT, TIME }
 
 data class Settings(
     val count: Int = 10,
@@ -120,6 +121,20 @@ data class Settings(
     val weakPriority: Boolean = true,
     val maxAttempts: Int = 3,
     val gameFontSizeSp: Int = 44,
+    val sharedThreeCorrectAllModes: Boolean = false,
+    val newOnly: Boolean = false,
+)
+
+data class DailyChallengeSettings(
+    val goalType: DailyGoalType = DailyGoalType.COUNT,
+    val targetCount: Int = 100,
+    val targetMinutes: Int = 30,
+    val deckNames: Set<String> = emptySet(),
+)
+
+data class DeckFieldPrefs(
+    val qFields: List<Int>,
+    val aFields: List<Int>,
 )
 
 data class RoundConfig(
@@ -136,6 +151,13 @@ data class RoundConfig(
     val dailyKey: String? = null,
     val threeCorrectKey: String? = null,
     val initialThreeCorrectCounts: Map<Long, Int> = emptyMap(),
+    val sharedThreeCorrectAllModes: Boolean = false,
+    val newOnly: Boolean = false,
+    val threeCorrectKeyByNoteId: Map<Long, String> = emptyMap(),
+    val sourceDeckByNoteId: Map<Long, String> = emptyMap(),
+    val dailyGoalType: DailyGoalType? = null,
+    val dailyTargetValue: Int = 0,
+    val historyDeckName: String = "",
 )
 
 data class RoundResult(
@@ -143,6 +165,7 @@ data class RoundResult(
     val score: Int,
     val maxCombo: Int,
     val durationSec: Int,
+    val dailyGoalCompleted: Boolean = true,
 )
 
 data class HistoryEntry(
@@ -170,10 +193,13 @@ class Store(context: Context) {
         flashcardDeci = sp.getInt("flashcardDeci", 30),
         reverse = sp.getBoolean("reverse", false),
         gameMode = runCatching { GameMode.valueOf(sp.getString("gameMode", "NORMAL")!!) }
-            .getOrDefault(GameMode.NORMAL),
+            .getOrDefault(GameMode.NORMAL)
+            .let { if (it == GameMode.DAILY) GameMode.NORMAL else it },
         weakPriority = sp.getBoolean("weakPriority", true),
         maxAttempts = sp.getInt("maxAttempts", 3).coerceIn(1, 99),
         gameFontSizeSp = sp.getInt("gameFontSizeSp", 44).coerceIn(16, 96),
+        sharedThreeCorrectAllModes = sp.getBoolean("sharedThreeCorrectAllModes", false),
+        newOnly = sp.getBoolean("newOnly", false),
     )
 
     fun saveSettings(s: Settings) {
@@ -188,7 +214,66 @@ class Store(context: Context) {
             .putBoolean("weakPriority", s.weakPriority)
             .putInt("maxAttempts", s.maxAttempts.coerceIn(1, 99))
             .putInt("gameFontSizeSp", s.gameFontSizeSp.coerceIn(16, 96))
+            .putBoolean("sharedThreeCorrectAllModes", s.sharedThreeCorrectAllModes)
+            .putBoolean("newOnly", s.newOnly)
             .apply()
+    }
+
+    fun loadDailyChallengeSettings(): DailyChallengeSettings {
+        val raw = sp.getString("dailyChallengeSettings", null) ?: return DailyChallengeSettings()
+        return runCatching {
+            val o = JSONObject(raw)
+            val decks = mutableSetOf<String>()
+            val arr = o.optJSONArray("decks") ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                arr.optString(i).takeIf { it.isNotBlank() }?.let(decks::add)
+            }
+            DailyChallengeSettings(
+                goalType = runCatching {
+                    DailyGoalType.valueOf(o.optString("goalType", DailyGoalType.COUNT.name))
+                }.getOrDefault(DailyGoalType.COUNT),
+                targetCount = o.optInt("targetCount", 100).coerceIn(1, 9999),
+                targetMinutes = o.optInt("targetMinutes", 30).coerceIn(1, 600),
+                deckNames = decks,
+            )
+        }.getOrDefault(DailyChallengeSettings())
+    }
+
+    fun saveDailyChallengeSettings(value: DailyChallengeSettings) {
+        val o = JSONObject().apply {
+            put("goalType", value.goalType.name)
+            put("targetCount", value.targetCount.coerceIn(1, 9999))
+            put("targetMinutes", value.targetMinutes.coerceIn(1, 600))
+            put("decks", JSONArray().apply { value.deckNames.sorted().forEach { put(it) } })
+        }
+        sp.edit().putString("dailyChallengeSettings", o.toString()).apply()
+    }
+
+    fun loadDeckFieldPrefs(deckName: String, fieldCount: Int): DeckFieldPrefs {
+        val defaultQ = listOf(0)
+        val defaultA = listOf(if (fieldCount > 1) 1 else 0)
+        val raw = sp.getString("deckFieldPrefs", null) ?: return DeckFieldPrefs(defaultQ, defaultA)
+        return runCatching {
+            val root = JSONObject(raw)
+            val o = root.optJSONObject(deckName) ?: return@runCatching DeckFieldPrefs(defaultQ, defaultA)
+            fun indices(name: String, fallback: List<Int>): List<Int> {
+                val arr = o.optJSONArray(name) ?: return fallback
+                val values = (0 until arr.length()).mapNotNull { arr.optInt(it, -1).takeIf { v -> v in 0 until fieldCount } }
+                    .distinct().sorted()
+                return values.ifEmpty { fallback }
+            }
+            DeckFieldPrefs(indices("q", defaultQ), indices("a", defaultA))
+        }.getOrDefault(DeckFieldPrefs(defaultQ, defaultA))
+    }
+
+    fun saveDeckFieldPrefs(deckName: String, qFields: List<Int>, aFields: List<Int>) {
+        val root = runCatching { JSONObject(sp.getString("deckFieldPrefs", "{}") ?: "{}") }
+            .getOrDefault(JSONObject())
+        root.put(deckName, JSONObject().apply {
+            put("q", JSONArray().apply { qFields.distinct().sorted().forEach { put(it) } })
+            put("a", JSONArray().apply { aFields.distinct().sorted().forEach { put(it) } })
+        })
+        sp.edit().putString("deckFieldPrefs", root.toString()).apply()
     }
 
     fun loadHistory(): List<HistoryEntry> {
@@ -255,6 +340,35 @@ class Store(context: Context) {
         val o = JSONObject()
         map.forEach { (id, a) -> o.put(id.toString(), JSONArray().put(a[0]).put(a[1])) }
         sp.edit().putString("cardStats", o.toString()).apply()
+    }
+
+    fun loadSeenCardIds(deckName: String): Set<Long> {
+        val raw = sp.getString("seenCards", null) ?: return emptySet()
+        return runCatching {
+            val root = JSONObject(raw)
+            val arr = root.optJSONArray(deckName) ?: return@runCatching emptySet()
+            buildSet {
+                for (i in 0 until arr.length()) {
+                    arr.optString(i).toLongOrNull()?.let(::add)
+                }
+            }
+        }.getOrDefault(emptySet())
+    }
+
+    fun markCardSeen(deckName: String, noteId: Long) {
+        if (deckName.isBlank()) return
+        val root = runCatching { JSONObject(sp.getString("seenCards", "{}") ?: "{}") }
+            .getOrDefault(JSONObject())
+        val current = mutableSetOf<Long>()
+        val arr = root.optJSONArray(deckName)
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                arr.optString(i).toLongOrNull()?.let(current::add)
+            }
+        }
+        if (!current.add(noteId)) return
+        root.put(deckName, JSONArray().apply { current.sorted().forEach { put(it.toString()) } })
+        sp.edit().putString("seenCards", root.toString()).apply()
     }
 
     fun loadThreeCorrectProgress(profileKey: String): MutableMap<Long, Int> {
@@ -481,7 +595,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Stage { DECKS, FIELDS, QUIZ, FLASHCARD, RESULT, HISTORY, SETTINGS }
+private enum class Stage { DECKS, FIELDS, QUIZ, FLASHCARD, RESULT, HISTORY, SETTINGS, CARD_PROGRESS, DAILY_SETTINGS }
 
 private val CorrectGreen = Color(0xFF81C784)
 private val WrongRed = Color(0xFFE57373)
@@ -524,6 +638,8 @@ private fun App() {
     }
 
     var settings by remember { mutableStateOf(store.loadSettings()) }
+    var dailySettings by remember { mutableStateOf(store.loadDailyChallengeSettings()) }
+    var dailyHomeMessage by remember { mutableStateOf<String?>(null) }
     var stage by remember { mutableStateOf(Stage.DECKS) }
 
     var deckReload by remember { mutableIntStateOf(0) }
@@ -546,6 +662,7 @@ private fun App() {
     var lastDurationSec by remember { mutableIntStateOf(0) }
     var lastConfig by remember { mutableStateOf<RoundConfig?>(null) }
     var lastHistoryRecorded by remember { mutableStateOf(true) }
+    var lastDailyGoalCompleted by remember { mutableStateOf(true) }
     var lastMasteredCount by remember { mutableIntStateOf(0) }
     var lastThreeCorrectCompleted by remember { mutableIntStateOf(0) }
     var lastThreeCorrectTotal by remember { mutableIntStateOf(0) }
@@ -589,6 +706,150 @@ private fun App() {
         append('|').append(reverse)
     }
 
+    fun makeSharedThreeCorrectKey(): String = "shared-v1|$deckName"
+
+    fun makeGlobalDailyKey(value: DailyChallengeSettings = dailySettings): String = buildString {
+        append(store.todayKey())
+        append("|daily-v2|").append(value.goalType.name)
+        append('|').append(if (value.goalType == DailyGoalType.COUNT) value.targetCount else value.targetMinutes)
+        append('|').append(value.deckNames.sorted().joinToString(","))
+        append('|').append(settings.reverse)
+        append('|').append(settings.newOnly)
+        append('|').append(settings.sharedThreeCorrectAllModes)
+    }
+
+    fun startDailyChallenge() {
+        val available = decks.orEmpty()
+        val selectedDecks = available.filter { it.name in dailySettings.deckNames }
+        if (selectedDecks.isEmpty()) {
+            dailyHomeMessage = "デイリーに含めるデッキを設定してください。"
+            stage = Stage.DAILY_SETTINGS
+            return
+        }
+        scope.launch {
+            dailyHomeMessage = null
+            val loaded = withContext(Dispatchers.IO) {
+                selectedDecks.mapNotNull { deck ->
+                    runCatching { deck to loadNotes(context.contentResolver, deck.name) }.getOrNull()
+                }
+            }
+            val allItems = mutableListOf<QuizItem>()
+            val sourceDeckByNoteId = mutableMapOf<Long, String>()
+            loaded.forEach { (deck, deckNotes) ->
+                if (deckNotes.isEmpty()) return@forEach
+                val fieldCount = deckNotes.first().second.size
+                val prefs = store.loadDeckFieldPrefs(deck.name, fieldCount)
+                deckNotes.forEach { (id, flds) ->
+                    val item = QuizItem(
+                        noteId = id,
+                        question = joinFields(flds, prefs.qFields),
+                        displayAnswer = joinFields(flds, prefs.aFields),
+                        accepted = acceptedFrom(flds, prefs.aFields),
+                    )
+                    val usable = if (settings.reverse) {
+                        item.question.isNotBlank() && item.displayAnswer.isNotBlank()
+                    } else {
+                        item.question.isNotBlank() && item.accepted.isNotEmpty()
+                    }
+                    if (usable) {
+                        allItems += item
+                        sourceDeckByNoteId[id] = deck.name
+                    }
+                }
+            }
+
+            val sharedProgressByDeck = if (settings.sharedThreeCorrectAllModes) {
+                selectedDecks.associate { deck ->
+                    deck.name to store.loadThreeCorrectProgress("shared-v1|${deck.name}")
+                }
+            } else {
+                emptyMap()
+            }
+            val afterShared = if (settings.sharedThreeCorrectAllModes) {
+                allItems.filter { item ->
+                    val source = sourceDeckByNoteId[item.noteId].orEmpty()
+                    (sharedProgressByDeck[source]?.get(item.noteId) ?: 0) < THREE_CORRECT_TARGET
+                }
+            } else {
+                allItems
+            }
+            val eligible = if (settings.newOnly) {
+                val seenByDeck = selectedDecks.associate { deck ->
+                    deck.name to store.loadSeenCardIds(deck.name)
+                }
+                afterShared.filter { item ->
+                    val source = sourceDeckByNoteId[item.noteId].orEmpty()
+                    item.noteId !in seenByDeck[source].orEmpty()
+                }
+            } else {
+                afterShared
+            }
+            val dailyKey = makeGlobalDailyKey()
+            val ordered = eligible.distinctBy { it.noteId }.sortedBy { it.noteId }
+                .shuffled(Random(dailyKey.hashCode()))
+            val countTarget = dailySettings.targetCount.coerceIn(1, 9999)
+            if (dailySettings.goalType == DailyGoalType.COUNT && ordered.size < countTarget) {
+                dailyHomeMessage = "デイリー対象カードが${ordered.size}枚しかありません。目標の${countTarget}枚以上になるよう、デッキを追加するか条件を変更してください。"
+                stage = Stage.DECKS
+                return@launch
+            }
+            val selectedItems = when (dailySettings.goalType) {
+                DailyGoalType.COUNT -> ordered.take(countTarget)
+                DailyGoalType.TIME -> ordered
+            }
+            if (selectedItems.isEmpty()) {
+                dailyHomeMessage = if (settings.newOnly) {
+                    "デイリー対象に新規カードがありません。"
+                } else if (settings.sharedThreeCorrectAllModes) {
+                    "デイリー対象のカードはすべて成功3回に到達しています。"
+                } else {
+                    "デイリーデッキから出題できるカードを作れませんでした。"
+                }
+                stage = Stage.DECKS
+                return@launch
+            }
+
+            val keyByNoteId = if (settings.sharedThreeCorrectAllModes) {
+                selectedItems.associate { item ->
+                    item.noteId to "shared-v1|${sourceDeckByNoteId[item.noteId].orEmpty()}"
+                }
+            } else {
+                emptyMap()
+            }
+            val initialCounts = keyByNoteId.mapValues { (noteId, key) ->
+                store.loadThreeCorrectProgress(key)[noteId] ?: 0
+            }
+            config = RoundConfig(
+                items = selectedItems,
+                gameMode = GameMode.DAILY,
+                reverse = settings.reverse,
+                timeLimitSec = settings.timeLimitSec,
+                autoAdvance = settings.autoAdvance,
+                feedbackDeci = settings.feedbackDeci,
+                weakPriority = settings.weakPriority,
+                maxAttempts = settings.maxAttempts.coerceIn(1, 99),
+                gameFontSizeSp = settings.gameFontSizeSp.coerceIn(16, 96),
+                choicePool = allItems,
+                dailyKey = dailyKey,
+                threeCorrectKey = null,
+                initialThreeCorrectCounts = initialCounts,
+                sharedThreeCorrectAllModes = settings.sharedThreeCorrectAllModes,
+                newOnly = settings.newOnly,
+                threeCorrectKeyByNoteId = keyByNoteId,
+                sourceDeckByNoteId = sourceDeckByNoteId.filterKeys { id -> selectedItems.any { it.noteId == id } },
+                dailyGoalType = dailySettings.goalType,
+                dailyTargetValue = if (dailySettings.goalType == DailyGoalType.COUNT) {
+                    countTarget
+                } else {
+                    dailySettings.targetMinutes.coerceIn(1, 600) * 60
+                },
+                historyDeckName = "デイリーデッキ",
+            )
+            round++
+            stage = Stage.QUIZ
+        }
+    }
+
     fun selectRoundItems(usable: List<QuizItem>, gameMode: GameMode, reverse: Boolean): List<QuizItem> {
         return when (gameMode) {
             GameMode.NORMAL -> {
@@ -630,16 +891,26 @@ private fun App() {
         reverse: Boolean = settings.reverse,
     ): RoundConfig {
         val pool = buildUsableItems(reverse)
-        val threeCorrectKey = if (gameMode == GameMode.THREE_CORRECT) makeThreeCorrectKey(reverse) else null
+        val threeCorrectKey = when {
+            settings.sharedThreeCorrectAllModes -> makeSharedThreeCorrectKey()
+            gameMode == GameMode.THREE_CORRECT -> makeThreeCorrectKey(reverse)
+            else -> null
+        }
         val savedThreeCorrect = if (threeCorrectKey != null) {
             store.loadThreeCorrectProgress(threeCorrectKey)
         } else {
             emptyMap()
         }
-        val eligiblePool = if (gameMode == GameMode.THREE_CORRECT) {
+        val afterThreeCorrect = if (threeCorrectKey != null) {
             pool.filter { (savedThreeCorrect[it.noteId] ?: 0) < THREE_CORRECT_TARGET }
         } else {
             pool
+        }
+        val eligiblePool = if (settings.newOnly) {
+            val seen = store.loadSeenCardIds(deckName)
+            afterThreeCorrect.filter { it.noteId !in seen }
+        } else {
+            afterThreeCorrect
         }
         val selected = fixedItems ?: selectRoundItems(eligiblePool, gameMode, reverse)
         val distinctItems = selected.distinctBy { it.noteId }
@@ -656,11 +927,20 @@ private fun App() {
             choicePool = pool,
             dailyKey = if (gameMode == GameMode.DAILY) makeDailyKey(reverse) else null,
             threeCorrectKey = threeCorrectKey,
-            initialThreeCorrectCounts = if (gameMode == GameMode.THREE_CORRECT) {
+            initialThreeCorrectCounts = if (threeCorrectKey != null) {
                 distinctItems.associate { it.noteId to (savedThreeCorrect[it.noteId] ?: 0) }
             } else {
                 emptyMap()
             },
+            sharedThreeCorrectAllModes = settings.sharedThreeCorrectAllModes,
+            newOnly = settings.newOnly,
+            threeCorrectKeyByNoteId = if (threeCorrectKey != null) {
+                distinctItems.associate { it.noteId to threeCorrectKey }
+            } else {
+                emptyMap()
+            },
+            sourceDeckByNoteId = distinctItems.associate { it.noteId to deckName },
+            historyDeckName = deckName,
         )
     }
 
@@ -691,14 +971,15 @@ private fun App() {
         val completedSomething = result.logs.isNotEmpty()
         val dailyAlreadyCompleted = finishedConfig.gameMode == GameMode.DAILY &&
             finishedConfig.dailyKey?.let(store::isDailyCompleted) == true
-        val shouldRecord = completedSomething && !dailyAlreadyCompleted
+        val dailyGoalSatisfied = finishedConfig.gameMode != GameMode.DAILY || result.dailyGoalCompleted
+        val shouldRecord = completedSomething && dailyGoalSatisfied && !dailyAlreadyCompleted
 
-        if (completedSomething) store.bumpStreak()
+        if (completedSomething && dailyGoalSatisfied) store.bumpStreak()
         if (shouldRecord) {
             store.addHistory(
                 HistoryEntry(
                     timeMillis = System.currentTimeMillis(),
-                    deck = deckName,
+                    deck = finishedConfig.historyDeckName.ifBlank { deckName },
                     score = result.score,
                     correct = result.logs.count { it.correct },
                     total = result.logs.size,
@@ -736,6 +1017,7 @@ private fun App() {
         lastDurationSec = result.durationSec
         lastConfig = finishedConfig
         lastHistoryRecorded = shouldRecord
+        lastDailyGoalCompleted = result.dailyGoalCompleted
         stage = Stage.RESULT
     }
 
@@ -757,13 +1039,29 @@ private fun App() {
                             "を確認してください。"
                     }
             }
+            val validDailyDecks = dailySettings.deckNames.intersect(decks.orEmpty().map { it.name }.toSet())
+            val dailyConfigured = validDailyDecks.isNotEmpty()
+            val dailyCompleted = dailyConfigured && store.isDailyCompleted(makeGlobalDailyKey())
             DeckScreen(
                 decks = decks,
                 error = loadError,
                 streak = store.currentStreak(),
+                dailyConfigured = dailyConfigured,
+                dailyCompleted = dailyCompleted,
+                dailySummary = if (dailyConfigured) {
+                    when (dailySettings.goalType) {
+                        DailyGoalType.COUNT -> "毎日 ${dailySettings.targetCount}枚・${validDailyDecks.size}デッキ"
+                        DailyGoalType.TIME -> "毎日 ${dailySettings.targetMinutes}分・${validDailyDecks.size}デッキ"
+                    }
+                } else {
+                    "デッキと目標を設定してください"
+                },
+                dailyMessage = dailyHomeMessage,
                 onRetry = { decks = null; deckReload++ },
                 onHistory = { stage = Stage.HISTORY },
                 onSettings = { stage = Stage.SETTINGS },
+                onDailySettings = { stage = Stage.DAILY_SETTINGS },
+                onDailyStart = { startDailyChallenge() },
                 onSelect = { deck ->
                     scope.launch {
                         loadError = null
@@ -775,10 +1073,14 @@ private fun App() {
                             } else {
                                 deckName = deck.name
                                 notes = loaded
+                                val savedFields = store.loadDeckFieldPrefs(
+                                    deck.name,
+                                    loaded.first().second.size,
+                                )
                                 qFields.clear()
-                                qFields.add(0)
+                                qFields.addAll(savedFields.qFields)
                                 aFields.clear()
-                                aFields.add(if (loaded.first().second.size > 1) 1 else 0)
+                                aFields.addAll(savedFields.aFields)
                                 mode = Mode.QUIZ
                                 fieldError = null
                                 stage = Stage.FIELDS
@@ -798,6 +1100,18 @@ private fun App() {
             onBack = { stage = Stage.DECKS },
         )
 
+        Stage.DAILY_SETTINGS -> DailySettingsScreen(
+            decks = decks.orEmpty(),
+            value = dailySettings,
+            onChange = {
+                dailySettings = it
+                store.saveDailyChallengeSettings(it)
+                dailyHomeMessage = null
+            },
+            onStart = { startDailyChallenge() },
+            onBack = { stage = Stage.DECKS },
+        )
+
         Stage.HISTORY -> HistoryScreen(
             entries = store.loadHistory(),
             onClear = { store.clearHistory() },
@@ -812,11 +1126,17 @@ private fun App() {
             } else {
                 false
             }
-            val threeCorrectSummary = if (settings.gameMode == GameMode.THREE_CORRECT &&
+            val threeCorrectSummary = if (
+                (settings.sharedThreeCorrectAllModes || settings.gameMode == GameMode.THREE_CORRECT) &&
                 qFields.isNotEmpty() && aFields.isNotEmpty()
             ) {
                 val usable = buildUsableItems(settings.reverse)
-                val progress = store.loadThreeCorrectProgress(makeThreeCorrectKey(settings.reverse))
+                val progressKey = if (settings.sharedThreeCorrectAllModes) {
+                    makeSharedThreeCorrectKey()
+                } else {
+                    makeThreeCorrectKey(settings.reverse)
+                }
+                val progress = store.loadThreeCorrectProgress(progressKey)
                 usable.count { (progress[it.noteId] ?: 0) >= THREE_CORRECT_TARGET } to usable.size
             } else {
                 null
@@ -834,17 +1154,31 @@ private fun App() {
                 exportMessage = webExportMessage,
                 onToggleQ = { i ->
                     if (qFields.contains(i)) qFields.remove(i) else qFields.add(i)
+                    store.saveDeckFieldPrefs(deckName, qFields, aFields)
                     fieldError = null
                 },
                 onToggleA = { i ->
                     if (aFields.contains(i)) aFields.remove(i) else aFields.add(i)
+                    store.saveDeckFieldPrefs(deckName, qFields, aFields)
                     fieldError = null
                 },
                 onMode = { mode = it },
                 onChangeSettings = { settings = it; store.saveSettings(it) },
                 onResetThreeCorrect = {
-                    store.clearThreeCorrectProgress(makeThreeCorrectKey(settings.reverse))
+                    val progressKey = if (settings.sharedThreeCorrectAllModes) {
+                        makeSharedThreeCorrectKey()
+                    } else {
+                        makeThreeCorrectKey(settings.reverse)
+                    }
+                    store.clearThreeCorrectProgress(progressKey)
                     fieldError = "累積回数をリセットしました。"
+                },
+                onOpenCardProgress = {
+                    if (qFields.isEmpty() || aFields.isEmpty()) {
+                        fieldError = "問題側とこたえ側を、それぞれ1つ以上選んでください。"
+                    } else {
+                        stage = Stage.CARD_PROGRESS
+                    }
                 },
                 onExportWeb = {
                     pendingWebExport = buildWebDeckJson(deckName, notes)
@@ -856,14 +1190,19 @@ private fun App() {
                         fieldError = "問題側とこたえ側を、それぞれ1つ以上選んでください。"
                         return@FieldScreen
                     }
+                    store.saveDeckFieldPrefs(deckName, qFields, aFields)
                     if (mode == Mode.QUIZ) {
                         val builtConfig = createConfig(settings.gameMode)
                         if (builtConfig.items.isEmpty()) {
-                            fieldError = when (settings.gameMode) {
-                                GameMode.WEAK_CHALLENGE ->
+                            fieldError = when {
+                                settings.newOnly ->
+                                    "この条件に新規カードがありません。新規のみをオフにしてください。"
+                                settings.gameMode == GameMode.WEAK_CHALLENGE ->
                                     "苦手語がまだありません。まず通常モードなどで問題を解いてください。"
-                                GameMode.THREE_CORRECT ->
+                                settings.gameMode == GameMode.THREE_CORRECT ->
                                     "この設定では、すべてのカードが累積3回正解に到達しています。"
+                                settings.sharedThreeCorrectAllModes ->
+                                    "全モード共通の成功回数が3に到達しているため、出題できるカードがありません。"
                                 else -> "この組み合わせでは問題を作れませんでした。"
                             }
                         } else {
@@ -886,6 +1225,24 @@ private fun App() {
             )
         }
 
+        Stage.CARD_PROGRESS -> {
+            val progressKey = if (settings.sharedThreeCorrectAllModes) {
+                makeSharedThreeCorrectKey()
+            } else {
+                makeThreeCorrectKey(settings.reverse)
+            }
+            CardProgressScreen(
+                deckName = deckName,
+                items = buildUsableItems(settings.reverse),
+                initialProgress = store.loadThreeCorrectProgress(progressKey),
+                sharedAcrossModes = settings.sharedThreeCorrectAllModes,
+                onResetCard = { noteId ->
+                    store.updateThreeCorrectProgress(progressKey, noteId, 0)
+                },
+                onBack = { stage = Stage.FIELDS },
+            )
+        }
+
         Stage.QUIZ -> key(round) {
             val currentConfig = config!!
             QuizScreen(
@@ -895,9 +1252,16 @@ private fun App() {
                     store.saveSettings(settings)
                 },
                 onThreeCorrectProgressChanged = { noteId, count ->
-                    currentConfig.threeCorrectKey?.let { key ->
+                    val progressKey = currentConfig.threeCorrectKeyByNoteId[noteId]
+                        ?: currentConfig.threeCorrectKey
+                    progressKey?.let { key ->
                         store.updateThreeCorrectProgress(key, noteId, count)
                     }
+                },
+                onCardShown = { noteId ->
+                    val sourceDeck = currentConfig.sourceDeckByNoteId[noteId]
+                        ?: currentConfig.historyDeckName.ifBlank { deckName }
+                    store.markCardSeen(sourceDeck, noteId)
                 },
                 onFinish = { result -> recordAndFinish(result, currentConfig) },
                 onQuit = { stage = Stage.DECKS },
@@ -927,31 +1291,37 @@ private fun App() {
                 maxCombo = lastMaxCombo,
                 durationSec = lastDurationSec,
                 historyRecorded = lastHistoryRecorded,
+                dailyGoalCompleted = lastDailyGoalCompleted,
                 masteredCount = lastMasteredCount,
                 missedCount = missed.size,
                 threeCorrectCompleted = lastThreeCorrectCompleted,
                 threeCorrectTotal = lastThreeCorrectTotal,
                 onRetry = {
-                    val nextConfig = if (finishedConfig.gameMode == GameMode.MASTERY) {
-                        createConfig(
-                            gameMode = GameMode.MASTERY,
-                            fixedItems = finishedConfig.items,
-                            reverse = finishedConfig.reverse,
-                        )
+                    if (finishedConfig.gameMode == GameMode.DAILY) {
+                        startDailyChallenge()
                     } else {
-                        createConfig(finishedConfig.gameMode, reverse = finishedConfig.reverse)
-                    }
-                    if (nextConfig.items.isEmpty()) {
-                        fieldError = if (finishedConfig.gameMode == GameMode.THREE_CORRECT) {
-                            "この設定では、すべてのカードが累積3回正解に到達しています。"
+                        val nextConfig = if (finishedConfig.gameMode == GameMode.MASTERY) {
+                            createConfig(
+                                gameMode = GameMode.MASTERY,
+                                fixedItems = finishedConfig.items,
+                                reverse = finishedConfig.reverse,
+                            )
                         } else {
-                            "この組み合わせでは問題を作れませんでした。"
+                            createConfig(finishedConfig.gameMode, reverse = finishedConfig.reverse)
                         }
-                        stage = Stage.FIELDS
-                    } else {
-                        config = nextConfig
-                        round++
-                        stage = Stage.QUIZ
+                        if (nextConfig.items.isEmpty()) {
+                            fieldError = when {
+                                finishedConfig.newOnly -> "この条件に新規カードがありません。"
+                                finishedConfig.gameMode == GameMode.THREE_CORRECT ->
+                                    "この設定では、すべてのカードが累積3回正解に到達しています。"
+                                else -> "この組み合わせでは問題を作れませんでした。"
+                            }
+                            stage = Stage.FIELDS
+                        } else {
+                            config = nextConfig
+                            round++
+                            stage = Stage.QUIZ
+                        }
                     }
                 },
                 onRetryMissed = {
@@ -1003,7 +1373,15 @@ private fun PermissionScreen(onRequest: () -> Unit) {
 @Composable
 private fun DeckScreen(
     decks: List<DeckInfo>?, error: String?, streak: Int,
-    onRetry: () -> Unit, onHistory: () -> Unit, onSettings: () -> Unit,
+    dailyConfigured: Boolean,
+    dailyCompleted: Boolean,
+    dailySummary: String,
+    dailyMessage: String?,
+    onRetry: () -> Unit,
+    onHistory: () -> Unit,
+    onSettings: () -> Unit,
+    onDailySettings: () -> Unit,
+    onDailyStart: () -> Unit,
     onSelect: (DeckInfo) -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
@@ -1026,6 +1404,61 @@ private fun DeckScreen(
             }
         }
         Spacer(Modifier.height(12.dp))
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            tonalElevation = if (dailyConfigured && !dailyCompleted) 6.dp else 2.dp,
+            color = if (dailyConfigured && !dailyCompleted) {
+                ComboOrange.copy(alpha = 0.22f)
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+            shape = RoundedCornerShape(14.dp),
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            if (dailyCompleted) "✓ 今日のデイリー完了" else "✨ 今日のデイリー",
+                            fontWeight = FontWeight.Bold,
+                            color = if (dailyConfigured && !dailyCompleted) ComboOrange
+                            else MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            dailySummary,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = onDailySettings) { Text("設定") }
+                }
+                Button(
+                    onClick = onDailyStart,
+                    enabled = !dailyCompleted,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        when {
+                            !dailyConfigured -> "デイリー設定を開く"
+                            dailyCompleted -> "今日は完了済み"
+                            else -> "デイリーチャレンジを始める"
+                        }
+                    )
+                }
+                if (dailyMessage != null) {
+                    Text(
+                        dailyMessage,
+                        color = WrongRed,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
         when {
             error != null -> {
                 Text(error, color = WrongRed)
@@ -1045,6 +1478,106 @@ private fun DeckScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun DailySettingsScreen(
+    decks: List<DeckInfo>,
+    value: DailyChallengeSettings,
+    onChange: (DailyChallengeSettings) -> Unit,
+    onStart: () -> Unit,
+    onBack: () -> Unit,
+) {
+    BackHandler { onBack() }
+    var targetText by remember(value.goalType, value.targetCount, value.targetMinutes) {
+        mutableStateOf(
+            if (value.goalType == DailyGoalType.COUNT) value.targetCount.toString()
+            else value.targetMinutes.toString()
+        )
+    }
+    val selectedExisting = value.deckNames.intersect(decks.map { it.name }.toSet())
+    Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
+        Text("デイリーチャレンジ設定", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "選んだデッキのカードを混ぜて、KanjiQuiz内だけの「デイリーデッキ」を毎日作ります。各デッキで最後に選んだ問題側・こたえ側を使用します。",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        ChipRow(
+            "達成条件",
+            listOf("カード枚数" to DailyGoalType.COUNT, "プレイ時間" to DailyGoalType.TIME),
+            value.goalType,
+        ) { next ->
+            targetText = if (next == DailyGoalType.COUNT) value.targetCount.toString()
+            else value.targetMinutes.toString()
+            onChange(value.copy(goalType = next))
+        }
+        OutlinedTextField(
+            value = targetText,
+            onValueChange = { raw ->
+                val digits = raw.filter { it.isDigit() }.take(4)
+                targetText = digits
+                digits.toIntOrNull()?.let { number ->
+                    if (value.goalType == DailyGoalType.COUNT && number in 1..9999) {
+                        onChange(value.copy(targetCount = number))
+                    } else if (value.goalType == DailyGoalType.TIME && number in 1..600) {
+                        onChange(value.copy(targetMinutes = number))
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            label = {
+                Text(if (value.goalType == DailyGoalType.COUNT) "毎日のカード枚数" else "毎日のプレイ時間")
+            },
+            suffix = { Text(if (value.goalType == DailyGoalType.COUNT) "枚" else "分") },
+            supportingText = {
+                Text(if (value.goalType == DailyGoalType.COUNT) "1〜9999枚" else "1〜600分")
+            },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+        )
+        Spacer(Modifier.height(12.dp))
+        Text("含めるデッキ（${selectedExisting.size}件）", fontWeight = FontWeight.Bold)
+        if (decks.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text("デッキがありません。")
+            }
+        } else {
+            LazyColumn(modifier = Modifier.weight(1f)) {
+                items(decks, key = { it.id }) { deck ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            val next = value.deckNames.toMutableSet()
+                            if (!next.add(deck.name)) next.remove(deck.name)
+                            onChange(value.copy(deckNames = next))
+                        }.padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = deck.name in value.deckNames,
+                            onCheckedChange = {
+                                val next = value.deckNames.toMutableSet()
+                                if (it) next.add(deck.name) else next.remove(deck.name)
+                                onChange(value.copy(deckNames = next))
+                            },
+                        )
+                        Text(deck.name, modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Button(
+            onClick = onStart,
+            enabled = selectedExisting.isNotEmpty(),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("今日のデイリーを始める")
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("もどる") }
     }
 }
 
@@ -1107,8 +1640,8 @@ private fun SettingsScreen(
     if (showResetThreeCorrectConfirm) {
         AlertDialog(
             onDismissRequest = { showResetThreeCorrectConfirm = false },
-            title = { Text("3回正解の進捗をリセット") },
-            text = { Text("すべてのデッキ・フィールド・出題方向の累積正解数を削除します。") },
+            title = { Text("成功回数をリセット") },
+            text = { Text("全モード共通と3回正解モードの、すべての成功回数を削除します。") },
             confirmButton = {
                 TextButton(onClick = {
                     onResetThreeCorrectAll()
@@ -1164,9 +1697,51 @@ private fun SettingsScreen(
             settings.flashcardDeci) { onChange(settings.copy(flashcardDeci = it)) }
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-        Text("3回正解モード", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("新規カードだけ出題", fontWeight = FontWeight.Bold)
+                Text(
+                    "オンにすると、まだ一度も回答が確定していないカードだけを全クイズモードで出題します。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = settings.newOnly,
+                onCheckedChange = { onChange(settings.copy(newOnly = it)) },
+            )
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+        Text("3回正解", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("全モード共通で成功回数を使う", fontWeight = FontWeight.Bold)
+                Text(
+                    "オンにすると、すべてのクイズモードで正解は+1、不正解は-1。3回に到達したカードは全モードから除外されます。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = settings.sharedThreeCorrectAllModes,
+                onCheckedChange = { onChange(settings.copy(sharedThreeCorrectAllModes = it)) },
+            )
+        }
         Text(
-            "累積正解数はデッキ・フィールド・出題方向ごとに保存されます。",
+            if (settings.sharedThreeCorrectAllModes) {
+                "成功回数はデッキとカードごとに共通保存されます。"
+            } else {
+                "3回正解モードの累積回数はデッキ・フィールド・出題方向ごとに保存されます。"
+            },
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1174,7 +1749,7 @@ private fun SettingsScreen(
         OutlinedButton(
             onClick = { showResetThreeCorrectConfirm = true },
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("すべての累積回数をリセット") }
+        ) { Text("すべての成功回数をリセット") }
 
         Spacer(Modifier.height(24.dp))
         Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("もどる") }
@@ -1361,6 +1936,7 @@ private fun FieldScreen(
     onMode: (Mode) -> Unit,
     onChangeSettings: (Settings) -> Unit,
     onResetThreeCorrect: () -> Unit,
+    onOpenCardProgress: () -> Unit,
     onExportWeb: () -> Unit,
     onStart: () -> Unit,
     onBack: () -> Unit,
@@ -1371,7 +1947,15 @@ private fun FieldScreen(
         AlertDialog(
             onDismissRequest = { showResetCurrentConfirm = false },
             title = { Text("この設定の進捗をリセット") },
-            text = { Text("このデッキ・フィールド・出題方向の累積正解数を削除します。") },
+            text = {
+                Text(
+                    if (settings.sharedThreeCorrectAllModes) {
+                        "このデッキの全モード共通の成功回数をすべて削除します。"
+                    } else {
+                        "このデッキ・フィールド・出題方向の累積正解数を削除します。"
+                    }
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     onResetThreeCorrect()
@@ -1415,7 +1999,6 @@ private fun FieldScreen(
                     "タイムアタック" to GameMode.TIME_ATTACK,
                     "3回正解" to GameMode.THREE_CORRECT,
                     "苦手語" to GameMode.WEAK_CHALLENGE,
-                    "デイリー" to GameMode.DAILY,
                 ),
                 settings.gameMode,
             ) { onChangeSettings(settings.copy(gameMode = it)) }
@@ -1441,10 +2024,16 @@ private fun FieldScreen(
                     modifier = Modifier.padding(top = 4.dp),
                 )
             }
-            if (settings.gameMode == GameMode.THREE_CORRECT && threeCorrectSummary != null) {
+            if ((settings.sharedThreeCorrectAllModes || settings.gameMode == GameMode.THREE_CORRECT) &&
+                threeCorrectSummary != null
+            ) {
                 val (completed, total) = threeCorrectSummary
                 Text(
-                    "累積達成 $completed/$total",
+                    if (settings.sharedThreeCorrectAllModes) {
+                        "全モード共通の達成 $completed/$total"
+                    } else {
+                        "累積達成 $completed/$total"
+                    },
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (total > 0 && completed >= total) CorrectGreen
@@ -1452,8 +2041,21 @@ private fun FieldScreen(
                     modifier = Modifier.padding(top = 6.dp),
                 )
                 TextButton(onClick = { showResetCurrentConfirm = true }) {
-                    Text("この設定の累積回数をリセット")
+                    Text(
+                        if (settings.sharedThreeCorrectAllModes) {
+                            "このデッキの共通回数をリセット"
+                        } else {
+                            "この設定の累積回数をリセット"
+                        }
+                    )
                 }
+            }
+
+            OutlinedButton(
+                onClick = onOpenCardProgress,
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+            ) {
+                Text("カード別の成功回数を見る")
             }
 
             ChipRow(
@@ -1468,6 +2070,46 @@ private fun FieldScreen(
 
             GameFontSizeField(settings.gameFontSizeSp) { size ->
                 onChangeSettings(settings.copy(gameFontSizeSp = size))
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("成功回数を全モードで共通にする", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Text(
+                        "正解で+1、不正解で-1。3回に到達したカードはすべてのクイズモードから除外されます",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = settings.sharedThreeCorrectAllModes,
+                    onCheckedChange = {
+                        onChangeSettings(settings.copy(sharedThreeCorrectAllModes = it))
+                    },
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("新規のみ", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    Text(
+                        "まだ一度も出題結果が確定していないカードだけを出します",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = settings.newOnly,
+                    onCheckedChange = { onChangeSettings(settings.copy(newOnly = it)) },
+                )
             }
 
             if (settings.gameMode in listOf(
@@ -1566,6 +2208,129 @@ private fun FieldScreen(
     }
 }
 
+
+@Composable
+private fun CardProgressScreen(
+    deckName: String,
+    items: List<QuizItem>,
+    initialProgress: Map<Long, Int>,
+    sharedAcrossModes: Boolean,
+    onResetCard: (Long) -> Unit,
+    onBack: () -> Unit,
+) {
+    BackHandler { onBack() }
+    var query by remember { mutableStateOf("") }
+    var progress by remember(initialProgress) {
+        mutableStateOf(initialProgress.mapValues { it.value.coerceIn(0, THREE_CORRECT_TARGET) })
+    }
+    val filtered = items
+        .distinctBy { it.noteId }
+        .filter {
+            query.isBlank() ||
+                it.question.contains(query, ignoreCase = true) ||
+                it.displayAnswer.contains(query, ignoreCase = true)
+        }
+        .sortedWith(
+            compareByDescending<QuizItem> { progress[it.noteId] ?: 0 }
+                .thenBy { it.question }
+        )
+    val completed = items.distinctBy { it.noteId }
+        .count { (progress[it.noteId] ?: 0) >= THREE_CORRECT_TARGET }
+
+    Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
+        Text("カード別の成功回数", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Text(
+            deckName,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            if (sharedAcrossModes) {
+                "全モード共通・達成 $completed/${items.distinctBy { it.noteId }.size}"
+            } else {
+                "3回正解モードの現在設定・達成 $completed/${items.distinctBy { it.noteId }.size}"
+            },
+            fontWeight = FontWeight.Bold,
+            color = if (completed > 0) CorrectGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            label = { Text("カードを検索") },
+            singleLine = true,
+        )
+        if (filtered.isEmpty()) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("該当するカードがありません。")
+            }
+        } else {
+            LazyColumn(modifier = Modifier.weight(1f)) {
+                items(filtered, key = { it.noteId }) { item ->
+                    val count = progress[item.noteId] ?: 0
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        tonalElevation = 2.dp,
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp)) {
+                            SelectionContainer {
+                                Text(
+                                    item.question,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            if (item.displayAnswer.isNotBlank()) {
+                                SelectionContainer {
+                                    Text(
+                                        item.displayAnswer,
+                                        fontSize = 13.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "$count/$THREE_CORRECT_TARGET" +
+                                        if (count >= THREE_CORRECT_TARGET) "　達成" else "",
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (count >= THREE_CORRECT_TARGET) CorrectGreen
+                                    else MaterialTheme.colorScheme.onSurface,
+                                )
+                                TextButton(
+                                    onClick = {
+                                        onResetCard(item.noteId)
+                                        progress = progress.toMutableMap().apply { remove(item.noteId) }
+                                    },
+                                    enabled = count > 0,
+                                ) {
+                                    Text("リセット")
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("もどる") }
+    }
+}
+
 private enum class Phase { ASKING, FEEDBACK }
 
 @Composable
@@ -1573,6 +2338,7 @@ private fun QuizScreen(
     config: RoundConfig,
     onGameFontSizeChanged: (Int) -> Unit,
     onThreeCorrectProgressChanged: (Long, Int) -> Unit,
+    onCardShown: (Long) -> Unit,
     onFinish: (RoundResult) -> Unit,
     onQuit: () -> Unit,
 ) {
@@ -1582,7 +2348,10 @@ private fun QuizScreen(
     val isSurvival = config.gameMode == GameMode.SURVIVAL
     val isMastery = config.gameMode == GameMode.MASTERY
     val isThreeCorrect = config.gameMode == GameMode.THREE_CORRECT
-    val isCycling = isTimeAttack || isSurvival
+    val isDailyTime = config.gameMode == GameMode.DAILY && config.dailyGoalType == DailyGoalType.TIME
+    val isDailyCount = config.gameMode == GameMode.DAILY && config.dailyGoalType == DailyGoalType.COUNT
+    val tracksThreeCorrectProgress = config.threeCorrectKey != null || config.threeCorrectKeyByNoteId.isNotEmpty()
+    val isCycling = isTimeAttack || isSurvival || isDailyTime
     val perQuestionTimer = !isTimeAttack && config.timeLimitSec > 0
     val limit = config.timeLimitSec.toFloat()
     val maxAttempts = config.maxAttempts.coerceIn(1, 99)
@@ -1606,7 +2375,8 @@ private fun QuizScreen(
     var retryNotice by remember { mutableStateOf<String?>(null) }
     var input by remember { mutableStateOf("") }
     var remaining by remember { mutableFloatStateOf(limit) }
-    var globalRemaining by remember { mutableFloatStateOf(TIME_ATTACK_SEC) }
+    val globalLimit = if (isDailyTime) config.dailyTargetValue.toFloat().coerceAtLeast(1f) else TIME_ATTACK_SEC
+    var globalRemaining by remember { mutableFloatStateOf(globalLimit) }
     var phase by remember { mutableStateOf(Phase.ASKING) }
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0 && !reverse && phase == Phase.ASKING
     val questionScrollState = rememberScrollState()
@@ -1653,6 +2423,11 @@ private fun QuizScreen(
                 score = score,
                 maxCombo = maxCombo,
                 durationSec = durationSec,
+                dailyGoalCompleted = when {
+                    isDailyTime -> globalRemaining <= 0f
+                    isDailyCount -> logs.size >= config.dailyTargetValue
+                    else -> true
+                },
             )
         )
     }
@@ -1679,8 +2454,17 @@ private fun QuizScreen(
         phase = Phase.ASKING
     }
 
+    fun activeCyclePool(): List<QuizItem> {
+        val answeredIds = if (config.newOnly) logs.map { it.item.noteId }.toSet() else emptySet()
+        return baseItems.filter { item ->
+            (!config.sharedThreeCorrectAllModes ||
+                (threeCorrectCounts[item.noteId] ?: 0) < THREE_CORRECT_TARGET) &&
+                (!config.newOnly || item.noteId !in answeredIds)
+        }
+    }
+
     fun reshuffleAvoidingLast(last: QuizItem): List<QuizItem> {
-        val next = baseItems.shuffled().toMutableList()
+        val next = activeCyclePool().shuffled().toMutableList()
         if (next.size > 1 && next.first().noteId == last.noteId) {
             val swapIndex = next.indexOfFirst { it.noteId != last.noteId }
             if (swapIndex > 0) {
@@ -1722,6 +2506,33 @@ private fun QuizScreen(
             return
         }
 
+        if (config.sharedThreeCorrectAllModes &&
+            (threeCorrectCounts[item.noteId] ?: 0) >= THREE_CORRECT_TARGET
+        ) {
+            val remainingItems = cycleItems.filter { it.noteId != item.noteId }
+            if (remainingItems.isEmpty()) {
+                finish()
+                return
+            }
+            cycleItems = remainingItems
+            if (index < cycleItems.size) {
+                resetForNextQuestion()
+                return
+            }
+            if (isCycling) {
+                cycleItems = reshuffleAvoidingLast(item)
+                if (cycleItems.isEmpty()) {
+                    finish()
+                    return
+                }
+                index = 0
+                resetForNextQuestion()
+                return
+            }
+            finish()
+            return
+        }
+
         if (index + 1 < cycleItems.size) {
             index++
             resetForNextQuestion()
@@ -1730,6 +2541,10 @@ private fun QuizScreen(
 
         if (isCycling) {
             cycleItems = reshuffleAvoidingLast(item)
+            if (cycleItems.isEmpty()) {
+                finish()
+                return
+            }
             index = 0
             resetForNextQuestion()
         } else {
@@ -1758,7 +2573,7 @@ private fun QuizScreen(
             }
             lastGained = 50 + speed + (combo - 1) * 5
             score += lastGained
-            if (isThreeCorrect) {
+            if (tracksThreeCorrectProgress) {
                 val current = threeCorrectCounts[item.noteId] ?: 0
                 val updated = (current + 1).coerceAtMost(THREE_CORRECT_TARGET)
                 threeCorrectCounts[item.noteId] = updated
@@ -1774,7 +2589,7 @@ private fun QuizScreen(
             lastGained = 0
             lastTimeBonus = 0
             if (isSurvival) lives -= 1
-            if (isThreeCorrect) {
+            if (tracksThreeCorrectProgress) {
                 val current = threeCorrectCounts[item.noteId] ?: 0
                 val updated = (current - 1).coerceAtLeast(0)
                 threeCorrectCounts[item.noteId] = updated
@@ -1804,8 +2619,12 @@ private fun QuizScreen(
 
     BackHandler { showConfirm = true }
 
+    LaunchedEffect(questionSerial, item.noteId) {
+        onCardShown(item.noteId)
+    }
+
     LaunchedEffect(Unit) {
-        if (isTimeAttack) {
+        if (isTimeAttack || isDailyTime) {
             while (globalRemaining > 0f && !ended) {
                 delay(100)
                 if (!showConfirm) {
@@ -1864,6 +2683,16 @@ private fun QuizScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             when {
+                isDailyTime -> Text(
+                    "デイリー 残り ${globalRemaining.roundToInt()}秒・${logs.size}問",
+                    fontWeight = FontWeight.Bold,
+                    color = if (globalRemaining < 60f) ComboOrange
+                    else MaterialTheme.colorScheme.onSurface,
+                )
+                isDailyCount -> Text(
+                    "デイリー ${logs.size.coerceAtMost(config.dailyTargetValue)} / ${config.dailyTargetValue}枚",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 isTimeAttack -> Text(
                     "残り ${globalRemaining.roundToInt()}秒・${logs.size}問",
                     fontWeight = FontWeight.Bold,
@@ -1934,6 +2763,18 @@ private fun QuizScreen(
         }
         if (!keyboardVisible) Spacer(Modifier.height(4.dp))
         when {
+            isDailyTime -> LinearProgressIndicator(
+                progress = { (globalRemaining / globalLimit).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(if (keyboardVisible) 5.dp else 8.dp),
+                color = if (globalRemaining < 60f) ComboOrange else MaterialTheme.colorScheme.primary,
+            )
+            isDailyCount -> LinearProgressIndicator(
+                progress = {
+                    if (config.dailyTargetValue <= 0) 0f
+                    else (logs.size.toFloat() / config.dailyTargetValue).coerceIn(0f, 1f)
+                },
+                modifier = Modifier.fillMaxWidth().height(if (keyboardVisible) 5.dp else 8.dp),
+            )
             isTimeAttack -> LinearProgressIndicator(
                 progress = { (globalRemaining / TIME_ATTACK_SEC).coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth().height(if (keyboardVisible) 5.dp else 8.dp),
@@ -2013,14 +2854,18 @@ private fun QuizScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    if (isThreeCorrect) {
+                    if (tracksThreeCorrectProgress) {
                         Spacer(Modifier.height(6.dp))
                         val currentCorrect = threeCorrectCounts[item.noteId] ?: 0
                         Text(
                             if (currentCorrect >= THREE_CORRECT_TARGET) {
-                                "累積3回正解：以後は出題されません"
+                                if (config.sharedThreeCorrectAllModes) {
+                                    "成功3回：全モードから除外されます"
+                                } else {
+                                    "累積3回正解：以後は出題されません"
+                                }
                             } else {
-                                "このカードの正解回数 $currentCorrect/$THREE_CORRECT_TARGET"
+                                "このカードの成功回数 $currentCorrect/$THREE_CORRECT_TARGET"
                             },
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
@@ -2113,6 +2958,9 @@ private fun QuizScreen(
                 isThreeCorrect && lastCorrect &&
                     (threeCorrectCounts[item.noteId] ?: 0) >= THREE_CORRECT_TARGET &&
                     threeCorrectQueue.size == 1 -> true
+                config.sharedThreeCorrectAllModes &&
+                    (threeCorrectCounts[item.noteId] ?: 0) >= THREE_CORRECT_TARGET &&
+                    activeCyclePool().isEmpty() -> true
                 !isCycling && !isMastery && !isThreeCorrect && index + 1 >= cycleItems.size -> true
                 else -> false
             }
@@ -2257,6 +3105,7 @@ private fun ResultScreen(
     maxCombo: Int,
     durationSec: Int,
     historyRecorded: Boolean,
+    dailyGoalCompleted: Boolean,
     masteredCount: Int,
     missedCount: Int,
     threeCorrectCompleted: Int,
@@ -2305,10 +3154,12 @@ private fun ResultScreen(
         if (!historyRecorded) {
             Spacer(Modifier.height(8.dp))
             Text(
-                if (gameMode == GameMode.DAILY && total > 0) {
-                    "今日の正式記録はすでに保存済みのため、今回は履歴に追加していません。"
-                } else {
-                    "回答がなかったため、今回は履歴に追加していません。"
+                when {
+                    gameMode == GameMode.DAILY && !dailyGoalCompleted ->
+                        "デイリーの達成条件に届かなかったため、今日は未完了です。"
+                    gameMode == GameMode.DAILY && total > 0 ->
+                        "今日の正式記録はすでに保存済みのため、今回は履歴に追加していません。"
+                    else -> "回答がなかったため、今回は履歴に追加していません。"
                 },
                 fontSize = 12.sp,
                 color = ComboOrange,

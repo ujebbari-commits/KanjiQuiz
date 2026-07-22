@@ -59,7 +59,7 @@ app/src/main/java/com/example/kanjiquiz/MainActivity.kt   ← 全ロジック
 
 1. 依頼者は本プロジェクトを GitHub リポジトリに push する（Termux の git 経由で設定済み）。
 2. push すると `.github/workflows/build.yml` が走り、`gradle assembleDebug` で **debug APK** をビルド。
-3. 成果物は Actions の Artifacts に `KanjiQuiz-apk` という名前で上がる（パス `app/build/outputs/apk/debug/app-debug.apk`）。
+3. 成果物は Actions の Artifacts に `KanjiQuiz-v1.10-apk` という名前で上がる（パス `app/build/outputs/apk/debug/app-debug.apk`）。
 4. 依頼者はそれをダウンロードして端末にインストール。
 
 - リポジトリ: `https://github.com/ujebbari-commits/KanjiQuiz.git`（GitHubユーザー名 `ujebbari-commits`）
@@ -198,12 +198,63 @@ git add -A && git commit -m "update" && git push
 - 再挑戦時は1問タイマーをリセットする。タイムアタックの全体タイマーはリセットしない。途中の誤答でコンボは0に戻る。
 
 
-### v1.3 / Web v0.1.0 追加実装
-- Android版は `versionCode = 4`、`versionName = 1.3`。
-- デッキのフィールド選択画面に「Web版用JSONを保存」を追加。AnkiDroidのデータには書き込まず、読み込んだノートをユーザー指定のJSONファイルへ保存する。
-- `web/` に依存ライブラリなしのFirefox向けPWAを追加。IndexedDBにデッキ、localStorageに設定・履歴・苦手度を保存する。
-- Web版はJSON / CSV / TSV / TXTを読み込む。Android版が出力する `KanjiQuizWebDeck` JSONを直接利用できる。
-- 通常、サバイバル、タイムアタック、3回正解、定着復習、苦手語、デイリー、逆4択、最大挑戦回数、履歴フィルター、グラフ、めくりを移植済み。
-- 問題文・答えはCanvasではなく選択可能なHTMLテキスト。文字選択中は設定によりタイマーを一時停止する。
-- `.github/workflows/pages.yml` で `web/` をGitHub Pagesへ公開する。
-- Web版のNode/jsdomスモークテストで、TSV取込→デッキ保存→通常クイズ→誤答後再挑戦→正解→結果画面まで確認済み。
+## v1.4 / Web v0.1.2 追加仕様
+
+- THREE_CORRECTの進捗はプレイをまたいで永続保存する。
+- 保存単位はデッキ、問題側フィールド、答え側フィールド、通常/逆方向の組み合わせ。
+- 最終確定した回答が正解なら +1、不正解なら -1。値は 0〜3。
+- 最大挑戦回数内の途中の誤答は進捗を変更しない。
+- 3到達カードは同じ設定のTHREE_CORRECTから除外する。
+- AndroidはSharedPreferences、WebはlocalStorageに保存する。
+
+
+## v1.5 / Web v0.1.3 追加仕様
+
+- 設定にゲーム画面の基準文字サイズを追加。Androidは16〜96sp、Webは16〜96px。初期値44。
+- AndroidはSharedPreferencesの `gameFontSizeSp`、Webは設定オブジェクトの `gameFontSize` に保存。
+- クイズ画面とめくり画面の A− / A＋ は4ずつ変更し、その場で永続保存する。
+- 問題文を基準サイズ、正解画面の問題・答え、逆4択、めくり裏面は一定比率で縮小する。
+- WebはCSSカスタムプロパティへ計算済みpx値を設定し、Firefoxでの互換性を確保する。
+
+
+## v1.7 / Web v0.1.5 追加仕様
+
+- 入力欄は自動フォーカスされるため、フォーカス状態だけをIME表示判定に使わない。
+- Android版は `WindowInsets.ime` の実際の高さ、Web版はフォーカス前後のViewport高差でソフトキーボードを判定する。
+- タイマー、進捗、パス、スコア、文字サイズ操作は常時表示し、IME表示中は余白と部品サイズだけを縮小する。
+- 問題文領域はIME表示中のみ内部スクロール可能にする。
+
+
+## v1.8 / Web v0.1.6 追加仕様
+
+- 最大挑戦回数は1問全体に対する回数であり、再挑戦ではその問題の残り時間を引き継ぐ。
+- Web版は回答・パスをタッチした際、Firefox AndroidのblurとViewport再レイアウトより前のpointerdownで処理する。マウスやキーボード操作は通常のclickを使う。
+- Android版は入力欄の横に回答ボタンを置き、回答・パスボタンへフォーカスを移さず、確定後にIMEを閉じる。再挑戦に入った場合はIMEを維持する。
+
+## v1.9 / Web v0.1.7 追加仕様
+
+- Settings.sharedThreeCorrectAllModes（Webは同名設定）を追加。
+- オン時の進捗キーはデッキ単位（Android: `shared-v1|<deckName>`、Web: `shared-v1|<deckId>`）。noteIdごとに0〜3を保存する。
+- すべてのクイズモードで、確定正解時+1、確定不正解・パス・時間切れ時-1。再挑戦途中の誤答では更新しない。
+- 3到達カードはラウンド開始時に除外。サバイバル／タイムアタックなどの循環中に3へ到達した場合も、その場で以後の循環対象から外す。
+- CARD_PROGRESS画面（WebはcardProgress）から、現在有効な進捗プロファイルをカード単位で確認・リセットできる。
+- 共通設定オフ時は、従来どおり3回正解モード専用のデッキ・問題フィールド・回答フィールド・方向別進捗を使う。
+
+## v1.10 / Web v0.1.8 追加仕様
+
+### 新規のみ
+- `Settings.newOnly` を全クイズ形式共通のフィルターとして使用する。
+- 「新規」は過去の正誤履歴ではなく、問題として画面に表示されたことがあるかで判定する。
+- AndroidはSharedPreferencesの `seenCards` にデッキ名ごとのノートIDを保存する。WebはlocalStorageの `kq.seenCards` に `deckId|noteId` を保存する。
+- 問題表示時点で即保存するため、途中終了したカードも次回は新規扱いしない。
+- 循環形式では、同じプレイ中に一度確定した新規カードを再度出さない。
+
+### 仮想デイリーデッキ
+- ホームのデイリー欄から専用設定画面へ移動し、複数デッキを選択できる。
+- 選択デッキで最後に保存した問題側・回答側フィールド設定を使い、カードを混ぜて `デイリーデッキ` として出題する。このデッキはAnkiDroidには作成せず、KanjiQuizのラウンド内だけに存在する。
+- 達成条件は `DailyGoalType.COUNT`（枚数）または `TIME`（分）のどちらか。設定はAndroidのSharedPreferences / WebのlocalStorageに保存する。
+- COUNTはその日のキーを使った決定的シャッフルから指定枚数のユニークカードを選ぶ。対象が目標枚数未満なら目標を勝手に下げず、開始を止めて案内する。
+- TIMEは指定秒数までカードを循環する。新規のみとの併用で新規カードを使い切った場合は早期終了するが、時間目標未達なのでデイリー完了にはしない。
+- 完了キーは日付、目標種別・値、対象デッキ、出題方向、新規のみ、全モード共通成功回数の設定を含む。
+- 未完了日はホームのデイリー領域を強調表示し、達成後は当日の開始ボタンを無効化する。
+- デイリー履歴のデッキ名は `デイリーデッキ`。カード成績と共通成功回数は元デッキのカードへ保存する。

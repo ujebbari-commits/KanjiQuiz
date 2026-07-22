@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.6";
+const APP_VERSION = "0.1.8";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -29,7 +29,9 @@ const DEFAULT_SETTINGS = {
   weakPriority: true,
   maxAttempts: 3,
   gameFontSize: 44,
-  pauseWhileSelecting: true
+  pauseWhileSelecting: true,
+  sharedThreeCorrectAllModes: false,
+  newOnly: false
 };
 
 const app = document.getElementById("app");
@@ -116,7 +118,9 @@ function loadSettings() {
     maxAttempts: clampInt(saved.maxAttempts ?? DEFAULT_SETTINGS.maxAttempts, 1, 99),
     feedbackDeci: clampInt(saved.feedbackDeci ?? DEFAULT_SETTINGS.feedbackDeci, 1, 600),
     flashcardDeci: clampInt(saved.flashcardDeci ?? DEFAULT_SETTINGS.flashcardDeci, 3, 600),
-    gameFontSize: clampInt(saved.gameFontSize ?? DEFAULT_SETTINGS.gameFontSize, 16, 96)
+    gameFontSize: clampInt(saved.gameFontSize ?? DEFAULT_SETTINGS.gameFontSize, 16, 96),
+    gameMode: saved.gameMode === "DAILY" ? "NORMAL" : (saved.gameMode || DEFAULT_SETTINGS.gameMode),
+    newOnly: Boolean(saved.newOnly)
   };
 }
 
@@ -189,12 +193,33 @@ function saveCardStats(stats) {
   writeJson("kq.cardStats", stats);
 }
 
+function loadSeenCards() {
+  const value = readJson("kq.seenCards", {});
+  return value && typeof value === "object" ? value : {};
+}
+
+function isCardSeen(item, config = null) {
+  return Boolean(loadSeenCards()[itemIdentity(item, config)]);
+}
+
+function markCardSeen(item, config = null) {
+  const seen = loadSeenCards();
+  const key = itemIdentity(item, config);
+  if (!key || seen[key]) return;
+  seen[key] = true;
+  writeJson("kq.seenCards", seen);
+}
+
 function loadThreeCorrectProgress() {
   return readJson("kq.threeCorrectProgress", {});
 }
 
 function threeCorrectProfileKey(deck, prefs, reverse) {
   return `v1|${deck.id}|${[...prefs.qFields].sort((a, b) => a - b).join(",")}|${[...prefs.aFields].sort((a, b) => a - b).join(",")}|${reverse}`;
+}
+
+function sharedThreeCorrectProfileKey(deck) {
+  return `shared-v1|${deck.id}`;
 }
 
 function getThreeCorrectProfile(profileKey) {
@@ -224,6 +249,14 @@ function resetAllThreeCorrectProgress() {
 
 function statKey(deckId, noteId) {
   return `${deckId}|${noteId}`;
+}
+
+function itemDeckId(item, config = null) {
+  return String(item?.sourceDeckId ?? config?.deck?.id ?? "");
+}
+
+function itemIdentity(item, config = null) {
+  return statKey(itemDeckId(item, config), item.noteId);
 }
 
 function todayKey() {
@@ -264,6 +297,41 @@ function markDailyCompleted(key) {
   const completed = readJson("kq.dailyCompleted", {});
   completed[key] = true;
   writeJson("kq.dailyCompleted", completed);
+}
+
+const DEFAULT_DAILY_CHALLENGE = {
+  goalType: "COUNT",
+  targetCount: 100,
+  targetMinutes: 30,
+  deckIds: []
+};
+
+function loadDailyChallengeSettings() {
+  const saved = readJson("kq.dailyChallengeSettings", {});
+  return {
+    goalType: saved.goalType === "TIME" ? "TIME" : "COUNT",
+    targetCount: clampInt(saved.targetCount ?? 100, 1, 9999),
+    targetMinutes: clampInt(saved.targetMinutes ?? 30, 1, 600),
+    deckIds: Array.isArray(saved.deckIds) ? [...new Set(saved.deckIds.map(String))] : []
+  };
+}
+
+function saveDailyChallengeSettings(value) {
+  writeJson("kq.dailyChallengeSettings", {
+    goalType: value.goalType === "TIME" ? "TIME" : "COUNT",
+    targetCount: clampInt(value.targetCount, 1, 9999),
+    targetMinutes: clampInt(value.targetMinutes, 1, 600),
+    deckIds: [...new Set((value.deckIds || []).map(String))]
+  });
+}
+
+function globalDailyKey(daily, settings) {
+  const target = daily.goalType === "TIME" ? daily.targetMinutes : daily.targetCount;
+  return [
+    todayKey(), "daily-v2", daily.goalType, target,
+    [...daily.deckIds].sort().join(","),
+    Boolean(settings.reverse), Boolean(settings.newOnly), Boolean(settings.sharedThreeCorrectAllModes)
+  ].join("|");
 }
 
 function fieldPrefKey(deckId) {
@@ -423,7 +491,7 @@ function smartReverseChoices(item, pool) {
   const targetAnswerLength = normalizeKana(item.displayAnswer).length;
   const seen = new Set();
   const ranked = pool
-    .filter(candidate => candidate.noteId !== item.noteId && candidate.question.trim() && candidate.question !== item.question)
+    .filter(candidate => itemIdentity(candidate) !== itemIdentity(item) && candidate.question.trim() && candidate.question !== item.question)
     .filter(candidate => {
       if (seen.has(candidate.question)) return false;
       seen.add(candidate.question);
@@ -702,7 +770,9 @@ function render() {
     case "import": renderImport(); break;
     case "fields": renderFields(); break;
     case "settings": renderSettings(); break;
+    case "dailySettings": renderDailySettings(); break;
     case "history": renderHistory(); break;
+    case "cardProgress": renderCardProgress(); break;
     case "quiz": renderQuiz(); break;
     case "flash": renderFlash(); break;
     case "result": renderResult(); break;
@@ -721,6 +791,16 @@ function stopScreenTimersExcept(screen) {
 }
 
 function renderHome() {
+  const daily = loadDailyChallengeSettings();
+  const settings = loadSettings();
+  const validDailyDecks = state.decks.filter(deck => daily.deckIds.includes(String(deck.id)));
+  const dailyConfigured = validDailyDecks.length > 0;
+  const dailyKey = globalDailyKey({ ...daily, deckIds: validDailyDecks.map(deck => String(deck.id)) }, settings);
+  const dailyDone = dailyConfigured && isDailyCompleted(dailyKey);
+  const dailySummary = dailyConfigured
+    ? `${daily.goalType === "TIME" ? `毎日 ${daily.targetMinutes}分` : `毎日 ${daily.targetCount}枚`}・${validDailyDecks.length}デッキ`
+    : "デッキと目標を設定してください";
+
   const deckCards = state.decks.length
     ? state.decks.map(deck => `
       <article class="card deck-card">
@@ -742,11 +822,40 @@ function renderHome() {
       </div>
     </div>
     <div class="stack" style="margin-top:14px">
+      <section class="card daily-card ${dailyConfigured && !dailyDone ? "daily-pending" : ""}">
+        <div class="row-wrap space-between">
+          <div>
+            <strong>${dailyDone ? "✓ 今日のデイリー完了" : "✨ 今日のデイリー"}</strong>
+            <div class="subtle small">${escapeHtml(dailySummary)}</div>
+          </div>
+          <button class="btn btn-ghost" id="daily-settings" type="button">設定</button>
+        </div>
+        <button class="btn btn-primary btn-wide" id="daily-start" type="button" ${dailyDone ? "disabled" : ""}>
+          ${dailyConfigured ? (dailyDone ? "今日は完了済み" : "デイリーチャレンジを始める") : "デイリー設定を開く"}
+        </button>
+        <div id="daily-home-error"></div>
+      </section>
       <button class="btn btn-primary btn-wide" type="button" data-nav="import">デッキを読み込む</button>
       ${deckCards}
     </div>
     <div class="footer-note">カード文字は選択可能です。Firefox上でYomitanを直接利用できます。<br>Web v${APP_VERSION}</div>
   `);
+
+  document.getElementById("daily-settings").addEventListener("click", () => navigate("dailySettings"));
+  document.getElementById("daily-start").addEventListener("click", () => {
+    if (!dailyConfigured) return navigate("dailySettings");
+    const config = createDailyRoundConfig(settings, { ...daily, deckIds: validDailyDecks.map(deck => String(deck.id)) });
+    if (!config.items.length) {
+      const message = config.errorMessage || (settings.newOnly
+        ? "デイリー対象に新規カードがありません。"
+        : settings.sharedThreeCorrectAllModes
+          ? "デイリー対象のカードはすべて成功3回に到達しています。"
+          : "デイリーデッキから出題できるカードを作れませんでした。");
+      document.getElementById("daily-home-error").innerHTML = `<div class="error">${escapeHtml(message)}</div>`;
+      return;
+    }
+    startQuiz(config);
+  });
 
   document.querySelectorAll("[data-open-deck]").forEach(button => {
     button.addEventListener("click", () => {
@@ -756,6 +865,84 @@ function renderHome() {
       state.fieldConfig = loadFieldPrefs(deck);
       navigate("fields");
     });
+  });
+}
+
+function renderDailySettings() {
+  const daily = loadDailyChallengeSettings();
+  const validIds = new Set(state.decks.map(deck => String(deck.id)));
+  const selected = daily.deckIds.filter(id => validIds.has(String(id)));
+  const deckRows = state.decks.length
+    ? state.decks.map(deck => {
+        const prefs = loadFieldPrefs(deck);
+        const questionNames = prefs.qFields.map(index => deck.fields[index] || `フィールド${index + 1}`).join("＋");
+        const answerNames = prefs.aFields.map(index => deck.fields[index] || `フィールド${index + 1}`).join("＋");
+        return `<label class="check-row card">
+          <input type="checkbox" data-daily-deck="${escapeHtml(String(deck.id))}" ${selected.includes(String(deck.id)) ? "checked" : ""}>
+          <span><strong>${escapeHtml(deck.name)}</strong><br><span class="subtle small">問題: ${escapeHtml(questionNames)} / 答え: ${escapeHtml(answerNames)}</span></span>
+        </label>`;
+      }).join("")
+    : `<div class="notice">先にデッキを読み込んでください。</div>`;
+
+  app.innerHTML = shell("デイリーチャレンジ設定", `
+    <div class="stack">
+      <div class="card stack">
+        <div class="subtle small">選んだデッキのカードを混ぜて、KanjiQuiz内だけの「デイリーデッキ」を毎日作ります。各デッキで最後に選んだ問題側・こたえ側を使います。</div>
+        <label><span>達成条件</span>
+          <select class="select" id="daily-goal-type">
+            <option value="COUNT" ${daily.goalType === "COUNT" ? "selected" : ""}>カード枚数</option>
+            <option value="TIME" ${daily.goalType === "TIME" ? "selected" : ""}>プレイ時間</option>
+          </select>
+        </label>
+        <label id="daily-count-wrap"><span>毎日のカード枚数</span><input class="field" id="daily-count" type="number" min="1" max="9999" value="${daily.targetCount}"></label>
+        <label id="daily-time-wrap"><span>毎日のプレイ時間（分）</span><input class="field" id="daily-minutes" type="number" min="1" max="600" value="${daily.targetMinutes}"></label>
+      </div>
+      <div class="stack">
+        <strong>含めるデッキ（${selected.length}件）</strong>
+        ${deckRows}
+      </div>
+      <button class="btn btn-primary btn-wide" id="save-daily-start" type="button" ${selected.length ? "" : "disabled"}>保存して今日のデイリーを始める</button>
+      <button class="btn btn-ghost btn-wide" id="save-daily" type="button">保存して戻る</button>
+      <div id="daily-settings-error"></div>
+    </div>
+  `);
+
+  const updateVisibility = () => {
+    const type = document.getElementById("daily-goal-type").value;
+    document.getElementById("daily-count-wrap").hidden = type !== "COUNT";
+    document.getElementById("daily-time-wrap").hidden = type !== "TIME";
+  };
+  updateVisibility();
+  document.getElementById("daily-goal-type").addEventListener("change", updateVisibility);
+
+  const collect = () => ({
+    goalType: document.getElementById("daily-goal-type").value === "TIME" ? "TIME" : "COUNT",
+    targetCount: clampInt(document.getElementById("daily-count").value, 1, 9999),
+    targetMinutes: clampInt(document.getElementById("daily-minutes").value, 1, 600),
+    deckIds: [...document.querySelectorAll("[data-daily-deck]:checked")].map(input => String(input.dataset.dailyDeck))
+  });
+
+  document.querySelectorAll("[data-daily-deck]").forEach(input => {
+    input.addEventListener("change", () => {
+      const next = collect();
+      saveDailyChallengeSettings(next);
+      renderDailySettings();
+    });
+  });
+
+  document.getElementById("save-daily").addEventListener("click", () => {
+    saveDailyChallengeSettings(collect());
+    navigate("home");
+  });
+  document.getElementById("save-daily-start").addEventListener("click", () => {
+    const next = collect();
+    saveDailyChallengeSettings(next);
+    const config = createDailyRoundConfig(loadSettings(), next);
+    if (!config.items.length) {
+      document.getElementById("daily-settings-error").innerHTML = `<div class="error">${escapeHtml(config.errorMessage || "出題できるカードがありません。")}</div>`;
+      return;
+    }
+    startQuiz(config);
   });
 }
 
@@ -877,7 +1064,7 @@ function renderImport() {
 }
 
 function restoreAppData(appData) {
-  const allowed = ["settings", "history", "cardStats", "streak", "dailyCompleted", "threeCorrectProgress"];
+  const allowed = ["settings", "history", "cardStats", "seenCards", "streak", "dailyCompleted", "threeCorrectProgress", "dailyChallengeSettings"];
   for (const key of allowed) {
     if (appData[key] != null) writeJson(`kq.${key}`, appData[key]);
   }
@@ -885,7 +1072,7 @@ function restoreAppData(appData) {
 
 function gameModeOptions(selected) {
   return Object.entries(GAME_MODES)
-    .filter(([key]) => key !== "MASTERY")
+    .filter(([key]) => key !== "MASTERY" && key !== "DAILY")
     .map(([key, label]) => `<option value="${key}" ${selected === key ? "selected" : ""}>${escapeHtml(label)}</option>`)
     .join("");
 }
@@ -953,13 +1140,16 @@ function renderFields() {
             <input class="field" id="game-font-size" type="number" min="16" max="96" value="${settings.gameFontSize}">
           </label>
         </div>
+        <label class="row"><input id="new-only" type="checkbox" ${settings.newOnly ? "checked" : ""}><span>新規のみ（まだ回答結果が確定していないカードだけ）</span></label>
         <label class="row"><input id="weak-priority" type="checkbox" ${settings.weakPriority ? "checked" : ""}><span>苦手カードを優先</span></label>
         <label class="row"><input id="auto-advance" type="checkbox" ${settings.autoAdvance ? "checked" : ""}><span>正誤表示後に自動で次へ</span></label>
+        <label class="row"><input id="shared-three-all" type="checkbox" ${settings.sharedThreeCorrectAllModes ? "checked" : ""}><span>成功回数を全モードで共通にする（3回で全モードから除外）</span></label>
         ${dailyDone ? `<div class="notice">今日の正式なデイリーチャレンジは完了済みです。再挑戦できますが履歴には追加されません。</div>` : ""}
         <div id="three-correct-panel" class="notice" hidden></div>
       </div>
 
       <div id="field-error"></div>
+      <button class="btn btn-ghost btn-wide" id="open-card-progress" type="button">カード別の成功回数を見る</button>
       <button class="btn btn-primary btn-wide" id="start-game" type="button">スタート</button>
       <div class="grid-2">
         <button class="btn btn-ghost" id="export-deck" type="button">このデッキをJSON保存</button>
@@ -972,23 +1162,28 @@ function renderFields() {
   const updateThreeCorrectPanel = () => {
     const panel = document.getElementById("three-correct-panel");
     const selectedMode = document.getElementById("game-mode").value;
-    if (selectedMode !== "THREE_CORRECT") {
+    const shared = document.getElementById("shared-three-all").checked;
+    if (!shared && selectedMode !== "THREE_CORRECT") {
       panel.hidden = true;
       panel.innerHTML = "";
       return;
     }
     const reverse = document.getElementById("reverse-mode").value === "true";
-    const profileKey = threeCorrectProfileKey(deck, prefs, reverse);
+    const profileKey = shared
+      ? sharedThreeCorrectProfileKey(deck)
+      : threeCorrectProfileKey(deck, prefs, reverse);
     const progress = getThreeCorrectProfile(profileKey);
     const usable = makeUsableItems(deck, prefs, reverse);
     const completed = usable.filter(item => (progress[String(item.noteId)] || 0) >= THREE_CORRECT_TARGET).length;
     panel.hidden = false;
     panel.innerHTML = `
-      <div><strong>累積達成 ${completed}/${usable.length}</strong></div>
-      <div class="small">正解で+1、不正解で-1。3に到達したカードは以後出題されません。</div>
-      <button class="btn btn-ghost btn-wide" id="reset-three-current" type="button">この設定の累積回数をリセット</button>`;
+      <div><strong>${shared ? "全モード共通の達成" : "累積達成"} ${completed}/${usable.length}</strong></div>
+      <div class="small">正解で+1、不正解で-1。3に到達したカードは${shared ? "全モード" : "3回正解モード"}から除外されます。</div>
+      <button class="btn btn-ghost btn-wide" id="reset-three-current" type="button">${shared ? "このデッキの共通回数" : "この設定の累積回数"}をリセット</button>`;
     document.getElementById("reset-three-current").addEventListener("click", () => {
-      if (!confirm("このデッキ・フィールド・出題方向の累積正解数をリセットしますか？")) return;
+      if (!confirm(shared
+        ? "このデッキの全モード共通の成功回数をリセットしますか？"
+        : "このデッキ・フィールド・出題方向の累積正解数をリセットしますか？")) return;
       resetThreeCorrectProfile(profileKey);
       updateThreeCorrectPanel();
     });
@@ -996,6 +1191,7 @@ function renderFields() {
 
   document.getElementById("game-mode").addEventListener("change", updateThreeCorrectPanel);
   document.getElementById("reverse-mode").addEventListener("change", updateThreeCorrectPanel);
+  document.getElementById("shared-three-all").addEventListener("change", updateThreeCorrectPanel);
 
   document.querySelectorAll("[data-mode]").forEach(button => {
     button.addEventListener("click", () => {
@@ -1020,6 +1216,19 @@ function renderFields() {
     });
   });
 
+  document.getElementById("open-card-progress").addEventListener("click", () => {
+    const nextSettings = collectFieldSettings(settings);
+    saveSettings(nextSettings);
+    state.fieldConfig = prefs;
+    saveFieldPrefs(deck.id, prefs);
+    if (!prefs.qFields.length || !prefs.aFields.length) {
+      document.getElementById("field-error").innerHTML =
+        `<div class="error">問題側とこたえ側を、それぞれ1つ以上選んでください。</div>`;
+      return;
+    }
+    navigate("cardProgress");
+  });
+
   document.getElementById("start-game").addEventListener("click", () => {
     const nextSettings = collectFieldSettings(settings);
     saveSettings(nextSettings);
@@ -1041,11 +1250,15 @@ function renderFields() {
     }
     const config = createRoundConfig(deck, prefs, nextSettings);
     if (!config.items.length) {
-      const message = nextSettings.gameMode === "WEAK_CHALLENGE"
-        ? "苦手語がまだありません。まず通常モードなどで問題を解いてください。"
-        : nextSettings.gameMode === "THREE_CORRECT"
-          ? "この設定では、すべてのカードが累積3回正解に到達しています。"
-          : "この組み合わせでは問題を作れませんでした。";
+      const message = nextSettings.newOnly
+        ? "この条件に新規カードがありません。新規のみをオフにしてください。"
+        : nextSettings.gameMode === "WEAK_CHALLENGE"
+          ? "苦手語がまだありません。まず通常モードなどで問題を解いてください。"
+          : nextSettings.gameMode === "THREE_CORRECT"
+            ? "この設定では、すべてのカードが累積3回正解に到達しています。"
+            : nextSettings.sharedThreeCorrectAllModes
+              ? "全モード共通の成功回数が3に到達しているため、出題できるカードがありません。"
+              : "この組み合わせでは問題を作れませんでした。";
       errorBox.innerHTML = `<div class="error">${escapeHtml(message)}</div>`;
       return;
     }
@@ -1090,13 +1303,17 @@ function collectFieldSettings(base) {
     feedbackDeci: clampInt(Math.round(Number(document.getElementById("feedback-sec").value) * 10), 1, 600),
     gameFontSize: clampInt(document.getElementById("game-font-size").value, 16, 96),
     weakPriority: document.getElementById("weak-priority").checked,
-    autoAdvance: document.getElementById("auto-advance").checked
+    autoAdvance: document.getElementById("auto-advance").checked,
+    sharedThreeCorrectAllModes: document.getElementById("shared-three-all").checked,
+    newOnly: document.getElementById("new-only").checked
   };
 }
 
 function makeUsableItems(deck, prefs, reverse) {
   return deck.notes.map(note => ({
     noteId: note.id,
+    sourceDeckId: String(deck.id),
+    sourceDeckName: deck.name,
     question: joinFields(note.fields, prefs.qFields),
     displayAnswer: joinFields(note.fields, prefs.aFields),
     accepted: acceptedFrom(note.fields, prefs.aFields)
@@ -1149,13 +1366,20 @@ function createRoundConfig(deck, prefs, settings, options = {}) {
   const reverse = options.reverse ?? settings.reverse;
   const pool = makeUsableItems(deck, prefs, reverse);
   const gameMode = options.gameMode ?? settings.gameMode;
-  const threeCorrectKey = gameMode === "THREE_CORRECT" ? threeCorrectProfileKey(deck, prefs, reverse) : null;
+  const threeCorrectKey = settings.sharedThreeCorrectAllModes
+    ? sharedThreeCorrectProfileKey(deck)
+    : gameMode === "THREE_CORRECT"
+      ? threeCorrectProfileKey(deck, prefs, reverse)
+      : null;
   const savedThreeCorrect = threeCorrectKey ? getThreeCorrectProfile(threeCorrectKey) : {};
-  const eligiblePool = gameMode === "THREE_CORRECT"
+  const afterThreeCorrect = threeCorrectKey
     ? pool.filter(item => (savedThreeCorrect[String(item.noteId)] || 0) < THREE_CORRECT_TARGET)
     : pool;
+  const eligiblePool = settings.newOnly
+    ? afterThreeCorrect.filter(item => !isCardSeen(item, { deck }))
+    : afterThreeCorrect;
   const selected = options.fixedItems ?? selectRoundItems(eligiblePool, gameMode, { ...settings, reverse }, deck, prefs);
-  const items = uniqueBy(selected, item => item.noteId);
+  const items = uniqueBy(selected, item => itemIdentity(item, { deck }));
   return {
     deck,
     prefs: structuredClone(prefs),
@@ -1172,9 +1396,88 @@ function createRoundConfig(deck, prefs, settings, options = {}) {
     choicePool: pool,
     dailyKey: gameMode === "DAILY" ? makeDailyKey(deck, prefs.qFields, prefs.aFields, reverse) : null,
     threeCorrectKey,
-    initialThreeCorrectCounts: gameMode === "THREE_CORRECT"
-      ? Object.fromEntries(items.map(item => [String(item.noteId), savedThreeCorrect[String(item.noteId)] || 0]))
-      : {}
+    sharedThreeCorrectAllModes: Boolean(settings.sharedThreeCorrectAllModes),
+    newOnly: Boolean(settings.newOnly),
+    threeCorrectKeyByCard: threeCorrectKey
+      ? Object.fromEntries(items.map(item => [itemIdentity(item, { deck }), threeCorrectKey]))
+      : {},
+    initialThreeCorrectCounts: threeCorrectKey
+      ? Object.fromEntries(items.map(item => [itemIdentity(item, { deck }), savedThreeCorrect[String(item.noteId)] || 0]))
+      : {},
+    dailyGoalType: null,
+    dailyTargetValue: 0
+  };
+}
+
+function createDailyRoundConfig(settings, daily) {
+  const selectedDecks = state.decks.filter(deck => daily.deckIds.includes(String(deck.id)));
+  const allItems = selectedDecks.flatMap(deck => makeUsableItems(deck, loadFieldPrefs(deck), settings.reverse));
+  const progressCache = {};
+  const afterShared = settings.sharedThreeCorrectAllModes
+    ? allItems.filter(item => {
+        const deck = selectedDecks.find(candidate => String(candidate.id) === String(item.sourceDeckId));
+        if (!deck) return false;
+        const profileKey = sharedThreeCorrectProfileKey(deck);
+        progressCache[profileKey] ||= getThreeCorrectProfile(profileKey);
+        return (progressCache[profileKey][String(item.noteId)] || 0) < THREE_CORRECT_TARGET;
+      })
+    : allItems;
+  const eligible = settings.newOnly
+    ? afterShared.filter(item => !isCardSeen(item))
+    : afterShared;
+  const key = globalDailyKey(daily, settings);
+  const random = mulberry32(hashString(key));
+  const ordered = shuffle(
+    uniqueBy(eligible, item => itemIdentity(item)).sort((a, b) => itemIdentity(a).localeCompare(itemIdentity(b))),
+    random
+  );
+  const countTarget = clampInt(daily.targetCount, 1, 9999);
+  const insufficientForCount = daily.goalType === "COUNT" && ordered.length < countTarget;
+  const items = insufficientForCount
+    ? []
+    : daily.goalType === "COUNT"
+      ? ordered.slice(0, countTarget)
+      : ordered;
+  const threeCorrectKeyByCard = {};
+  const initialThreeCorrectCounts = {};
+  if (settings.sharedThreeCorrectAllModes) {
+    for (const item of items) {
+      const deck = selectedDecks.find(candidate => String(candidate.id) === String(item.sourceDeckId));
+      if (!deck) continue;
+      const profileKey = sharedThreeCorrectProfileKey(deck);
+      progressCache[profileKey] ||= getThreeCorrectProfile(profileKey);
+      const cardKey = itemIdentity(item);
+      threeCorrectKeyByCard[cardKey] = profileKey;
+      initialThreeCorrectCounts[cardKey] = progressCache[profileKey][String(item.noteId)] || 0;
+    }
+  }
+  return {
+    deck: { id: "__daily__", name: "デイリーデッキ", fields: [], notes: [] },
+    prefs: null,
+    items,
+    gameMode: "DAILY",
+    reverse: settings.reverse,
+    timeLimitSec: settings.timeLimitSec,
+    autoAdvance: settings.autoAdvance,
+    feedbackDeci: settings.feedbackDeci,
+    weakPriority: settings.weakPriority,
+    maxAttempts: settings.maxAttempts,
+    gameFontSize: settings.gameFontSize,
+    pauseWhileSelecting: settings.pauseWhileSelecting,
+    choicePool: allItems,
+    dailyKey: key,
+    threeCorrectKey: null,
+    sharedThreeCorrectAllModes: Boolean(settings.sharedThreeCorrectAllModes),
+    newOnly: Boolean(settings.newOnly),
+    threeCorrectKeyByCard,
+    initialThreeCorrectCounts,
+    dailyGoalType: daily.goalType,
+    dailyTargetValue: daily.goalType === "TIME"
+      ? clampInt(daily.targetMinutes, 1, 600) * 60
+      : countTarget,
+    errorMessage: insufficientForCount
+      ? `デイリー対象カードが${ordered.length}枚しかありません。目標の${countTarget}枚以上になるよう、デッキを追加するか条件を変更してください。`
+      : ""
   };
 }
 
@@ -1208,7 +1511,10 @@ class QuizSession {
     this.attemptNumber = 1;
     this.questionSerial = 0;
     this.remaining = config.timeLimitSec;
-    this.globalRemaining = TIME_ATTACK_SEC;
+    this.globalLimit = config.gameMode === "DAILY" && config.dailyGoalType === "TIME"
+      ? Math.max(1, Number(config.dailyTargetValue) || 1)
+      : TIME_ATTACK_SEC;
+    this.globalRemaining = this.globalLimit;
     this.phase = "ASKING";
     this.lastCorrect = false;
     this.lastGained = 0;
@@ -1232,7 +1538,9 @@ class QuizSession {
   get isSurvival() { return this.config.gameMode === "SURVIVAL"; }
   get isMastery() { return this.config.gameMode === "MASTERY"; }
   get isThreeCorrect() { return this.config.gameMode === "THREE_CORRECT"; }
-  get isCycling() { return this.isTimeAttack || this.isSurvival; }
+  get isDailyTime() { return this.config.gameMode === "DAILY" && this.config.dailyGoalType === "TIME"; }
+  get isDailyCount() { return this.config.gameMode === "DAILY" && this.config.dailyGoalType === "COUNT"; }
+  get isCycling() { return this.isTimeAttack || this.isSurvival || this.isDailyTime; }
   get perQuestionTimer() { return !this.isTimeAttack && this.config.timeLimitSec > 0; }
 
   get item() {
@@ -1245,14 +1553,20 @@ class QuizSession {
   get answerText() { return this.config.reverse ? this.item.question : this.item.displayAnswer; }
   get choices() { return this.config.reverse ? smartReverseChoices(this.item, this.config.choicePool) : []; }
 
-  getThreeCorrectCount(noteId) {
-    return Number(this.threeCorrectCounts.get(String(noteId)) || 0);
+  cardKey(item = this.item) {
+    return itemIdentity(item, this.config);
   }
 
-  setThreeCorrectCount(noteId, count) {
+  getThreeCorrectCount(item = this.item) {
+    return Number(this.threeCorrectCounts.get(this.cardKey(item)) || 0);
+  }
+
+  setThreeCorrectCount(item, count) {
     const updated = Math.max(0, Math.min(THREE_CORRECT_TARGET, Number(count) || 0));
-    this.threeCorrectCounts.set(String(noteId), updated);
-    if (this.config.threeCorrectKey) setThreeCorrectCount(this.config.threeCorrectKey, noteId, updated);
+    const cardKey = this.cardKey(item);
+    this.threeCorrectCounts.set(cardKey, updated);
+    const profileKey = this.config.threeCorrectKeyByCard?.[cardKey] || this.config.threeCorrectKey;
+    if (profileKey) setThreeCorrectCount(profileKey, item.noteId, updated);
     return updated;
   }
 
@@ -1280,7 +1594,7 @@ class QuizSession {
       return;
     }
 
-    if (this.isTimeAttack) {
+    if (this.isTimeAttack || this.isDailyTime) {
       this.globalRemaining = Math.max(0, this.globalRemaining - delta);
       if (this.globalRemaining <= 0) {
         finishQuiz(this);
@@ -1326,10 +1640,20 @@ class QuizSession {
     renderQuizQuestion(this);
   }
 
+  activeCyclePool() {
+    const answered = this.config.newOnly
+      ? new Set(this.logs.map(log => this.cardKey(log.item)))
+      : new Set();
+    return this.baseItems.filter(item =>
+      (!this.config.sharedThreeCorrectAllModes || this.getThreeCorrectCount(item) < THREE_CORRECT_TARGET) &&
+      (!this.config.newOnly || !answered.has(this.cardKey(item)))
+    );
+  }
+
   reshuffleAvoidingLast(last) {
-    const next = shuffle(this.baseItems);
-    if (next.length > 1 && next[0].noteId === last.noteId) {
-      const swapIndex = next.findIndex(candidate => candidate.noteId !== last.noteId);
+    const next = shuffle(this.activeCyclePool());
+    if (next.length > 1 && this.cardKey(next[0]) === this.cardKey(last)) {
+      const swapIndex = next.findIndex(candidate => this.cardKey(candidate) !== this.cardKey(last));
       if (swapIndex > 0) [next[0], next[swapIndex]] = [next[swapIndex], next[0]];
     }
     return next;
@@ -1353,8 +1677,8 @@ class QuizSession {
         : 0;
       this.lastGained = 50 + speed + (this.combo - 1) * 5;
       this.score += this.lastGained;
-      if (this.isThreeCorrect) {
-        this.setThreeCorrectCount(this.item.noteId, this.getThreeCorrectCount(this.item.noteId) + 1);
+      if (this.config.threeCorrectKey || Object.keys(this.config.threeCorrectKeyByCard || {}).length) {
+        this.setThreeCorrectCount(this.item, this.getThreeCorrectCount(this.item) + 1);
       }
       if (this.isTimeAttack) {
         const comboBonus = this.combo % 5 === 0 ? 2 : 0;
@@ -1366,8 +1690,8 @@ class QuizSession {
       this.lastGained = 0;
       this.lastTimeBonus = 0;
       if (this.isSurvival) this.lives -= 1;
-      if (this.isThreeCorrect) {
-        this.setThreeCorrectCount(this.item.noteId, this.getThreeCorrectCount(this.item.noteId) - 1);
+      if (this.config.threeCorrectKey || Object.keys(this.config.threeCorrectKeyByCard || {}).length) {
+        this.setThreeCorrectCount(this.item, this.getThreeCorrectCount(this.item) - 1);
       }
     }
     this.lastCorrect = correct;
@@ -1391,11 +1715,30 @@ class QuizSession {
 
     if (this.isThreeCorrect) {
       const answered = this.threeCorrectQueue.shift();
-      const count = this.getThreeCorrectCount(answered.noteId);
+      const count = this.getThreeCorrectCount(answered);
       if (count < THREE_CORRECT_TARGET) this.threeCorrectQueue.push(answered);
       if (!this.threeCorrectQueue.length) return finishQuiz(this);
       this.resetForNextQuestion();
       return;
+    }
+
+    if (this.config.sharedThreeCorrectAllModes &&
+        this.getThreeCorrectCount(this.item) >= THREE_CORRECT_TARGET) {
+      const currentId = this.cardKey(this.item);
+      this.cycleItems = this.cycleItems.filter(item => this.cardKey(item) !== currentId);
+      if (!this.cycleItems.length) return finishQuiz(this);
+      if (this.index < this.cycleItems.length) {
+        this.resetForNextQuestion();
+        return;
+      }
+      if (this.isCycling) {
+        this.cycleItems = this.reshuffleAvoidingLast(this.item);
+        if (!this.cycleItems.length) return finishQuiz(this);
+        this.index = 0;
+        this.resetForNextQuestion();
+        return;
+      }
+      return finishQuiz(this);
     }
 
     if (this.index + 1 < this.cycleItems.length) {
@@ -1406,6 +1749,7 @@ class QuizSession {
 
     if (this.isCycling) {
       this.cycleItems = this.reshuffleAvoidingLast(this.item);
+      if (!this.cycleItems.length) return finishQuiz(this);
       this.index = 0;
       this.resetForNextQuestion();
     } else {
@@ -1488,6 +1832,7 @@ function bindImmediateQuizAction(button, action) {
 
 function renderQuizQuestion(session) {
   if (state.screen !== "quiz" || session.ended) return;
+  markCardSeen(session.item, session.config);
   quizInputFocused = false;
   quizViewportBaseline = Math.max(quizViewportBaseline, currentQuizViewportHeight());
   setQuizKeyboardLayout(false);
@@ -1556,7 +1901,7 @@ function renderQuizFeedback(session) {
   updateQuizHeaderUi(session);
   const log = session.logs.at(-1);
   const title = session.lastCorrect ? "⭕ 正解！" : log.input ? "❌ 不正解" : "⏰ 時間切れ・パス";
-  const currentThree = session.getThreeCorrectCount(session.item.noteId);
+  const currentThree = session.getThreeCorrectCount(session.item);
   document.getElementById("quiz-main").innerHTML = `
     <div class="feedback">
       <div class="feedback-title ${session.lastCorrect ? "correct" : "wrong"}">${title}</div>
@@ -1564,8 +1909,10 @@ function renderQuizFeedback(session) {
       <div class="selectable feedback-answer">${textHtml(session.answerText)}</div>
       ${!session.lastCorrect && log.input ? `<div class="wrong small">あなたの解答：${escapeHtml(log.input)}</div>` : ""}
       ${session.lastCorrect && session.attemptNumber > 1 ? `<div class="subtle small">${session.attemptNumber}回目の挑戦で正解</div>` : ""}
-      ${session.isThreeCorrect ? `<div class="${currentThree >= THREE_CORRECT_TARGET ? "correct" : "subtle"}">
-        ${currentThree >= THREE_CORRECT_TARGET ? "累積3回正解：以後は出題されません" : `このカードの累積正解数 ${currentThree}/${THREE_CORRECT_TARGET}`}
+      ${(session.config.threeCorrectKey || Object.keys(session.config.threeCorrectKeyByCard || {}).length) ? `<div class="${currentThree >= THREE_CORRECT_TARGET ? "correct" : "subtle"}">
+        ${currentThree >= THREE_CORRECT_TARGET
+          ? (session.config.sharedThreeCorrectAllModes ? "成功3回：全モードから除外されます" : "累積3回正解：以後は出題されません")
+          : `このカードの成功回数 ${currentThree}/${THREE_CORRECT_TARGET}`}
       </div>` : ""}
       ${session.lastCorrect ? `<div class="correct"><strong>+${session.lastGained}</strong></div>` : ""}
       ${session.isTimeAttack && session.lastTimeBonus > 0 ? `<div class="combo">⏱ +${session.lastTimeBonus}秒${session.lastTimeBonus >= 3 ? "（5コンボボーナス）" : ""}</div>` : ""}
@@ -1583,8 +1930,11 @@ function shouldFinishAfterFeedback(session) {
   if (session.isSurvival && session.lives <= 0) return true;
   if (session.isMastery && session.lastCorrect && session.masteryQueue.length === 1) return true;
   if (session.isThreeCorrect && session.lastCorrect &&
-      session.getThreeCorrectCount(session.item.noteId) >= THREE_CORRECT_TARGET &&
+      session.getThreeCorrectCount(session.item) >= THREE_CORRECT_TARGET &&
       session.threeCorrectQueue.length === 1) return true;
+  if (session.config.sharedThreeCorrectAllModes &&
+      session.getThreeCorrectCount(session.item) >= THREE_CORRECT_TARGET &&
+      session.activeCyclePool().length === 0) return true;
   if (!session.isCycling && !session.isMastery && !session.isThreeCorrect && session.index + 1 >= session.cycleItems.length) return true;
   return false;
 }
@@ -1596,14 +1946,16 @@ function updateQuizHeaderUi(session) {
   const retry = document.getElementById("quiz-retry");
   const score = document.getElementById("quiz-score");
   if (!status) return;
-  if (session.isTimeAttack) status.textContent = `残り ${Math.ceil(session.globalRemaining)}秒・${session.logs.length}問`;
+  if (session.isDailyTime) status.textContent = `デイリー 残り ${Math.ceil(session.globalRemaining)}秒・${session.logs.length}問`;
+  else if (session.isDailyCount) status.textContent = `デイリー ${Math.min(session.logs.length, session.config.dailyTargetValue)} / ${session.config.dailyTargetValue}枚`;
+  else if (session.isTimeAttack) status.textContent = `残り ${Math.ceil(session.globalRemaining)}秒・${session.logs.length}問`;
   else if (session.isSurvival) status.textContent = `${"❤".repeat(Math.max(0, session.lives))}${"♡".repeat(Math.max(0, 3 - session.lives))}・${session.logs.length}問`;
   else if (session.isMastery) status.textContent = `残り ${session.masteryQueue.length}語`;
   else if (session.isThreeCorrect) {
     const total = [...session.threeCorrectCounts.values()].reduce((sum, value) => sum + value, 0);
     status.textContent = `残り ${session.threeCorrectQueue.length}語・累積 ${total}/${session.baseItems.length * THREE_CORRECT_TARGET}`;
   } else status.textContent = `${session.index + 1} / ${session.cycleItems.length}`;
-  status.className = session.isTimeAttack && session.globalRemaining < 10 ? "wrong" : "";
+  status.className = (session.isTimeAttack && session.globalRemaining < 10) || (session.isDailyTime && session.globalRemaining < 60) ? "wrong" : "";
   combo.textContent = session.combo >= 2 ? `🔥 ${session.combo} COMBO` : "";
   attempt.textContent = session.phase === "ASKING" && session.config.maxAttempts > 1
     ? `挑戦 ${session.attemptNumber} / ${session.config.maxAttempts}` : "";
@@ -1615,7 +1967,15 @@ function updateQuizTimerUi(session) {
   updateQuizHeaderUi(session);
   const container = document.getElementById("quiz-progress");
   if (!container) return;
-  if (session.isTimeAttack) {
+  if (session.isDailyTime) {
+    const percent = Math.max(0, Math.min(100, (session.globalRemaining / session.globalLimit) * 100));
+    container.innerHTML = `<div class="progress ${session.globalRemaining < 60 ? "danger" : ""}"><div style="width:${percent}%"></div></div>`;
+  } else if (session.isDailyCount) {
+    const percent = session.config.dailyTargetValue > 0
+      ? Math.max(0, Math.min(100, (session.logs.length / session.config.dailyTargetValue) * 100))
+      : 0;
+    container.innerHTML = `<div class="progress"><div style="width:${percent}%"></div></div>`;
+  } else if (session.isTimeAttack) {
     const percent = Math.max(0, Math.min(100, (session.globalRemaining / TIME_ATTACK_SEC) * 100));
     container.innerHTML = `<div class="progress ${session.globalRemaining < 10 ? "danger" : ""}"><div style="width:${percent}%"></div></div>`;
   } else if (session.perQuestionTimer) {
@@ -1661,7 +2021,11 @@ function finishQuiz(session) {
     logs: session.logs,
     score: session.score,
     maxCombo: session.maxCombo,
-    durationSec
+    durationSec,
+    dailyGoalCompleted: session.config.gameMode !== "DAILY" ||
+      (session.isDailyTime
+        ? session.globalRemaining <= 0
+        : session.logs.length >= session.config.dailyTargetValue)
   });
   state.lastResult = result;
   state.quiz = null;
@@ -1672,7 +2036,7 @@ function recordRoundResult(config, round) {
   const stats = loadCardStats();
   const beforeWrong = {};
   for (const log of round.logs) {
-    const key = statKey(config.deck.id, log.item.noteId);
+    const key = statKey(itemDeckId(log.item, config), log.item.noteId);
     beforeWrong[key] = stats[key]?.[1] ?? 0;
     const current = stats[key] || [0, 0];
     current[0] += 1;
@@ -1683,8 +2047,9 @@ function recordRoundResult(config, round) {
 
   const completed = round.logs.length > 0;
   const dailyAlready = config.gameMode === "DAILY" && config.dailyKey && isDailyCompleted(config.dailyKey);
-  const shouldRecord = completed && !dailyAlready;
-  if (completed) bumpStreak();
+  const dailyGoalSatisfied = config.gameMode !== "DAILY" || Boolean(round.dailyGoalCompleted);
+  const shouldRecord = completed && dailyGoalSatisfied && !dailyAlready;
+  if (completed && dailyGoalSatisfied) bumpStreak();
   if (shouldRecord) {
     addHistory({
       timeMillis: Date.now(),
@@ -1702,7 +2067,7 @@ function recordRoundResult(config, round) {
     if (config.gameMode === "DAILY" && config.dailyKey) markDailyCompleted(config.dailyKey);
   }
 
-  const attemptedKeys = [...new Set(round.logs.map(log => statKey(config.deck.id, log.item.noteId)))];
+  const attemptedKeys = [...new Set(round.logs.map(log => statKey(itemDeckId(log.item, config), log.item.noteId)))];
   const masteredCount = attemptedKeys.filter(key => (beforeWrong[key] || 0) > 0 && (stats[key]?.[1] || 0) === 0).length;
   let threeCorrectCompleted = 0;
   let threeCorrectTotal = 0;
@@ -1728,7 +2093,7 @@ function renderResult() {
   const correct = result.logs.filter(log => log.correct).length;
   const total = result.logs.length;
   const accuracy = total ? Math.round((correct / total) * 100) : 0;
-  const missed = uniqueBy(result.logs.filter(log => !log.correct).map(log => log.item), item => item.noteId);
+  const missed = uniqueBy(result.logs.filter(log => !log.correct).map(log => log.item), item => itemIdentity(item, result.config));
   const missedDetails = result.logs.filter(log => !log.correct).map(log => `
     <div class="missed-item">
       <div class="selectable"><strong>${textHtml(log.item.question)}</strong></div>
@@ -1752,7 +2117,9 @@ function renderResult() {
             ? "この設定の全カードが累積3回正解に到達しました。"
             : `累積達成 ${result.threeCorrectCompleted}/${result.threeCorrectTotal}`}
         </div>` : ""}
-        ${!result.historyRecorded && result.config.gameMode === "DAILY" ? `<div class="notice">今日のデイリー履歴はすでに記録済みです。</div>` : ""}
+        ${!result.historyRecorded && result.config.gameMode === "DAILY" ? `<div class="notice">${result.dailyGoalCompleted
+          ? "今日のデイリー履歴はすでに記録済みです。"
+          : "デイリーの達成条件に届かなかったため、今日は未完了です。"}</div>` : ""}
       </div>
 
       ${missedDetails ? `<div class="card"><strong>間違えた問題</strong>${missedDetails}</div>` : `<div class="success center">全問正解です。</div>`}
@@ -1765,16 +2132,18 @@ function renderResult() {
 
   document.getElementById("retry-round").addEventListener("click", () => {
     const settings = loadSettings();
-    const config = result.config.gameMode === "MASTERY"
-      ? createRoundConfig(result.config.deck, result.config.prefs, settings, {
-          gameMode: "MASTERY",
-          fixedItems: result.config.items,
-          reverse: result.config.reverse
-        })
-      : createRoundConfig(result.config.deck, result.config.prefs, settings, {
-          gameMode: result.config.gameMode,
-          reverse: result.config.reverse
-        });
+    const config = result.config.gameMode === "DAILY"
+      ? createDailyRoundConfig(settings, loadDailyChallengeSettings())
+      : result.config.gameMode === "MASTERY"
+        ? createRoundConfig(result.config.deck, result.config.prefs, settings, {
+            gameMode: "MASTERY",
+            fixedItems: result.config.items,
+            reverse: result.config.reverse
+          })
+        : createRoundConfig(result.config.deck, result.config.prefs, settings, {
+            gameMode: result.config.gameMode,
+            reverse: result.config.reverse
+          });
     if (!config.items.length) {
       alert(config.gameMode === "THREE_CORRECT"
         ? "この設定では、すべてのカードが累積3回正解に到達しています。"
@@ -1786,11 +2155,24 @@ function renderResult() {
   });
 
   document.getElementById("mastery-missed")?.addEventListener("click", () => {
-    const config = createRoundConfig(result.config.deck, result.config.prefs, loadSettings(), {
-      gameMode: "MASTERY",
-      fixedItems: missed,
-      reverse: result.config.reverse
-    });
+    const settings = loadSettings();
+    const config = result.config.gameMode === "DAILY"
+      ? {
+          ...result.config,
+          items: missed,
+          gameMode: "MASTERY",
+          dailyKey: null,
+          dailyGoalType: null,
+          dailyTargetValue: 0,
+          initialThreeCorrectCounts: Object.fromEntries(
+            missed.map(item => [itemIdentity(item, result.config), result.config.initialThreeCorrectCounts?.[itemIdentity(item, result.config)] || 0])
+          )
+        }
+      : createRoundConfig(result.config.deck, result.config.prefs, settings, {
+          gameMode: "MASTERY",
+          fixedItems: missed,
+          reverse: result.config.reverse
+        });
     startQuiz(config);
   });
 }
@@ -1928,16 +2310,18 @@ function renderSettings() {
           <label><span>ゲーム画面の文字サイズ（16〜96px）</span><input class="field" id="s-font-size" type="number" min="16" max="96" value="${settings.gameFontSize}"></label>
         </div>
         <label class="row"><input id="s-auto" type="checkbox" ${settings.autoAdvance ? "checked" : ""}><span>正誤表示後に自動で次へ</span></label>
+        <label class="row"><input id="s-new-only" type="checkbox" ${settings.newOnly ? "checked" : ""}><span>新規カードだけ出題</span></label>
         <label class="row"><input id="s-weak" type="checkbox" ${settings.weakPriority ? "checked" : ""}><span>苦手カードを優先</span></label>
         <label class="row"><input id="s-selection-pause" type="checkbox" ${settings.pauseWhileSelecting ? "checked" : ""}><span>文字選択中はタイマーを停止</span></label>
+        <label class="row"><input id="s-shared-three-all" type="checkbox" ${settings.sharedThreeCorrectAllModes ? "checked" : ""}><span>成功回数を全モードで共通にする（3回で全モードから除外）</span></label>
         <button class="btn btn-primary btn-wide" id="save-settings" type="button">保存</button>
         <div id="settings-message"></div>
       </div>
 
       <div class="card stack">
-        <strong>3回正解モード</strong>
-        <div class="subtle small">累積正解数はデッキ・フィールド・出題方向ごとに保存されます。</div>
-        <button class="btn btn-danger btn-wide" id="reset-three-all" type="button">すべての累積回数をリセット</button>
+        <strong>成功回数</strong>
+        <div class="subtle small">共通設定がオンならデッキとカードごと、オフなら3回正解モードのフィールド・方向ごとに保存されます。</div>
+        <button class="btn btn-danger btn-wide" id="reset-three-all" type="button">すべての成功回数をリセット</button>
       </div>
 
       <div class="card stack">
@@ -1961,17 +2345,19 @@ function renderSettings() {
       flashcardDeci: clampInt(Math.round(Number(document.getElementById("s-flash").value) * 10), 3, 600),
       gameFontSize: clampInt(document.getElementById("s-font-size").value, 16, 96),
       autoAdvance: document.getElementById("s-auto").checked,
+      newOnly: document.getElementById("s-new-only").checked,
       weakPriority: document.getElementById("s-weak").checked,
-      pauseWhileSelecting: document.getElementById("s-selection-pause").checked
+      pauseWhileSelecting: document.getElementById("s-selection-pause").checked,
+      sharedThreeCorrectAllModes: document.getElementById("s-shared-three-all").checked
     };
     saveSettings(next);
     document.getElementById("settings-message").innerHTML = `<div class="success">保存しました。</div>`;
   });
 
   document.getElementById("reset-three-all").addEventListener("click", () => {
-    if (!confirm("すべてのデッキ・フィールド・出題方向の累積正解数を削除しますか？")) return;
+    if (!confirm("全モード共通と3回正解モードの、すべての成功回数を削除しますか？")) return;
     resetAllThreeCorrectProgress();
-    document.getElementById("settings-message").innerHTML = `<div class="success">3回正解モードの累積回数をリセットしました。</div>`;
+    document.getElementById("settings-message").innerHTML = `<div class="success">すべての成功回数をリセットしました。</div>`;
   });
 
   document.getElementById("export-backup").addEventListener("click", async () => {
@@ -1985,10 +2371,86 @@ function renderSettings() {
         settings: loadSettings(),
         history: loadHistory(),
         cardStats: loadCardStats(),
+        seenCards: loadSeenCards(),
         streak: readJson("kq.streak", { date: "", count: 0 }),
         dailyCompleted: readJson("kq.dailyCompleted", {}),
+        dailyChallengeSettings: loadDailyChallengeSettings(),
         threeCorrectProgress: loadThreeCorrectProgress()
       }
+    });
+  });
+}
+
+
+function renderCardProgress() {
+  const deck = state.currentDeck;
+  if (!deck) {
+    navigate("home", { push: false });
+    return;
+  }
+  const prefs = state.fieldConfig || loadFieldPrefs(deck);
+  const settings = loadSettings();
+  const profileKey = settings.sharedThreeCorrectAllModes
+    ? sharedThreeCorrectProfileKey(deck)
+    : threeCorrectProfileKey(deck, prefs, settings.reverse);
+  const progress = getThreeCorrectProfile(profileKey);
+  const items = uniqueBy(makeUsableItems(deck, prefs, settings.reverse), item => item.noteId)
+    .sort((a, b) => {
+      const countDiff = (progress[String(b.noteId)] || 0) - (progress[String(a.noteId)] || 0);
+      return countDiff || a.question.localeCompare(b.question, "ja");
+    });
+  const completed = items.filter(item => (progress[String(item.noteId)] || 0) >= THREE_CORRECT_TARGET).length;
+
+  const rows = items.map(item => {
+    const count = progress[String(item.noteId)] || 0;
+    return `
+      <article class="card progress-card" data-progress-card
+          data-search="${escapeHtml(`${item.question} ${item.displayAnswer}`.toLowerCase())}">
+        <div class="stack compact">
+          <div class="selectable"><strong>${textHtml(item.question)}</strong></div>
+          ${item.displayAnswer ? `<div class="selectable subtle small">${textHtml(item.displayAnswer)}</div>` : ""}
+          <div class="row-wrap space-between">
+            <span class="${count >= THREE_CORRECT_TARGET ? "correct" : ""}"><strong>${count}/${THREE_CORRECT_TARGET}${count >= THREE_CORRECT_TARGET ? "　達成" : ""}</strong></span>
+            <button class="btn btn-ghost" type="button" data-reset-progress="${escapeHtml(String(item.noteId))}" ${count > 0 ? "" : "disabled"}>リセット</button>
+          </div>
+        </div>
+      </article>`;
+  }).join("");
+
+  app.innerHTML = shell("カード別の成功回数", `
+    <div class="stack">
+      <div class="card stack">
+        <strong>${escapeHtml(deck.name)}</strong>
+        <div class="subtle small">${settings.sharedThreeCorrectAllModes
+          ? `全モード共通・達成 ${completed}/${items.length}`
+          : `3回正解モードの現在設定・達成 ${completed}/${items.length}`}</div>
+        <input class="field" id="progress-search" type="search" placeholder="カードを検索">
+      </div>
+      <div id="progress-empty" class="notice" ${items.length ? "hidden" : ""}>表示できるカードがありません。</div>
+      <div class="stack" id="progress-list">${rows}</div>
+      <button class="btn btn-ghost btn-wide" type="button" data-nav="fields">もどる</button>
+    </div>
+  `);
+
+  const search = document.getElementById("progress-search");
+  const empty = document.getElementById("progress-empty");
+  search.addEventListener("input", () => {
+    const query = search.value.trim().toLowerCase();
+    let visible = 0;
+    document.querySelectorAll("[data-progress-card]").forEach(card => {
+      const show = !query || card.dataset.search.includes(query);
+      card.hidden = !show;
+      if (show) visible += 1;
+    });
+    empty.hidden = visible > 0;
+    if (!visible) empty.textContent = "該当するカードがありません。";
+  });
+
+  document.querySelectorAll("[data-reset-progress]").forEach(button => {
+    button.addEventListener("click", () => {
+      const noteId = button.dataset.resetProgress;
+      setThreeCorrectCount(profileKey, noteId, 0);
+      renderCardProgress();
     });
   });
 }

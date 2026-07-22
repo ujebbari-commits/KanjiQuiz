@@ -275,3 +275,14 @@ body.quiz-keyboard-active {
   padding-block: 4px;
 }
 
+
+.daily-card { position: relative; overflow: hidden; }
+.daily-card.daily-pending {
+  border-color: var(--warning);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 35%, transparent), 0 0 18px color-mix(in srgb, var(--warning) 28%, transparent);
+  animation: dailyGlow 1.8s ease-in-out infinite alternate;
+}
+@keyframes dailyGlow {
+  from { box-shadow: 0 0 0 1px color-mix(in srgb, var(--warning) 25%, transparent), 0 0 8px color-mix(in srgb, var(--warning) 18%, transparent); }
+  to { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 45%, transparent), 0 0 22px color-mix(in srgb, var(--warning) 34%, transparent); }
+}

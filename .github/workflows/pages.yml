@@ -2,7 +2,7 @@ name: Deploy Web to GitHub Pages
 
 on:
   push:
-    branches: ["main"]
+    branches: [main]
     paths:
       - "web/**"
       - ".github/workflows/pages.yml"
@@ -30,11 +30,11 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
-      - name: Upload site
+      - name: Upload web files
         uses: actions/upload-pages-artifact@v3
         with:
           path: web
 
-      - name: Deploy
+      - name: Deploy Pages
         id: deployment
         uses: actions/deploy-pages@v4
