@@ -101,7 +101,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.13"
+private const val APP_VERSION = "1.14"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -130,6 +130,7 @@ data class DailyChallengeSettings(
     val goalType: DailyGoalType = DailyGoalType.COUNT,
     val targetCount: Int = 100,
     val targetMinutes: Int = 30,
+    val showOverallTimer: Boolean = false,
     val deckNames: Set<String> = emptySet(),
 )
 
@@ -158,6 +159,7 @@ data class RoundConfig(
     val sourceDeckByNoteId: Map<Long, String> = emptyMap(),
     val dailyGoalType: DailyGoalType? = null,
     val dailyTargetValue: Int = 0,
+    val showDailyOverallTimer: Boolean = false,
     val historyDeckName: String = "",
 )
 
@@ -235,6 +237,7 @@ class Store(context: Context) {
                 }.getOrDefault(DailyGoalType.COUNT),
                 targetCount = o.optInt("targetCount", 100).coerceIn(1, 9999),
                 targetMinutes = o.optInt("targetMinutes", 30).coerceIn(1, 600),
+                showOverallTimer = o.optBoolean("showOverallTimer", false),
                 deckNames = decks,
             )
         }.getOrDefault(DailyChallengeSettings())
@@ -245,6 +248,7 @@ class Store(context: Context) {
             put("goalType", value.goalType.name)
             put("targetCount", value.targetCount.coerceIn(1, 9999))
             put("targetMinutes", value.targetMinutes.coerceIn(1, 600))
+            put("showOverallTimer", value.showOverallTimer)
             put("decks", JSONArray().apply { value.deckNames.sorted().forEach { put(it) } })
         }
         sp.edit().putString("dailyChallengeSettings", o.toString()).apply()
@@ -857,6 +861,7 @@ private fun App() {
                 } else {
                     dailySettings.targetMinutes.coerceIn(1, 600) * 60
                 },
+                showDailyOverallTimer = dailySettings.showOverallTimer,
                 historyDeckName = "デイリーデッキ",
             )
             round++
@@ -1546,6 +1551,28 @@ private fun DailySettingsScreen(
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
         )
+        if (value.goalType == DailyGoalType.TIME) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onChange(value.copy(showOverallTimer = !value.showOverallTimer)) }
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(
+                    checked = value.showOverallTimer,
+                    onCheckedChange = { onChange(value.copy(showOverallTimer = it)) },
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("デイリー全体の残り時間を表示")
+                    Text(
+                        "初期値は非表示です。1問の制限時間が0以外なら、各問の残り時間は常に表示されます。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
         Spacer(Modifier.height(12.dp))
         Text("含めるデッキ（${selectedExisting.size}件）", fontWeight = FontWeight.Bold)
         if (decks.isEmpty()) {
@@ -2696,9 +2723,13 @@ private fun QuizScreen(
         ) {
             when {
                 isDailyTime -> Text(
-                    "デイリー 残り ${globalRemaining.roundToInt()}秒・${logs.size}問",
+                    if (config.showDailyOverallTimer) {
+                        "デイリー 残り ${globalRemaining.roundToInt()}秒・${logs.size}問"
+                    } else {
+                        "デイリー（時間制）・${logs.size}問"
+                    },
                     fontWeight = FontWeight.Bold,
-                    color = if (globalRemaining < 60f) ComboOrange
+                    color = if (config.showDailyOverallTimer && globalRemaining < 60f) ComboOrange
                     else MaterialTheme.colorScheme.onSurface,
                 )
                 isDailyCount -> Text(
@@ -2774,7 +2805,7 @@ private fun QuizScreen(
             }
         }
         if (!keyboardVisible) Spacer(Modifier.height(4.dp))
-        if (isDailyTime) {
+        if (isDailyTime && config.showDailyOverallTimer) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,

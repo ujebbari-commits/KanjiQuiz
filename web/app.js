@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.14";
+const APP_VERSION = "0.1.15";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -317,6 +317,7 @@ const DEFAULT_DAILY_CHALLENGE = {
   goalType: "COUNT",
   targetCount: 100,
   targetMinutes: 30,
+  showOverallTimer: false,
   deckIds: []
 };
 
@@ -326,6 +327,7 @@ function loadDailyChallengeSettings() {
     goalType: saved.goalType === "TIME" ? "TIME" : "COUNT",
     targetCount: clampInt(saved.targetCount ?? 100, 1, 9999),
     targetMinutes: clampInt(saved.targetMinutes ?? 30, 1, 600),
+    showOverallTimer: Boolean(saved.showOverallTimer),
     deckIds: Array.isArray(saved.deckIds) ? [...new Set(saved.deckIds.map(String))] : []
   };
 }
@@ -335,6 +337,7 @@ function saveDailyChallengeSettings(value) {
     goalType: value.goalType === "TIME" ? "TIME" : "COUNT",
     targetCount: clampInt(value.targetCount, 1, 9999),
     targetMinutes: clampInt(value.targetMinutes, 1, 600),
+    showOverallTimer: Boolean(value.showOverallTimer),
     deckIds: [...new Set((value.deckIds || []).map(String))]
   });
 }
@@ -999,6 +1002,10 @@ function renderDailySettings() {
         </label>
         <label id="daily-count-wrap"><span>毎日のカード枚数</span><input class="field" id="daily-count" type="number" min="1" max="9999" value="${daily.targetCount}"></label>
         <label id="daily-time-wrap"><span>毎日のプレイ時間（分）</span><input class="field" id="daily-minutes" type="number" min="1" max="600" value="${daily.targetMinutes}"></label>
+        <label class="check-row" id="daily-overall-timer-wrap">
+          <input type="checkbox" id="daily-show-overall-timer" ${daily.showOverallTimer ? "checked" : ""}>
+          <span>デイリー全体の残り時間を表示<br><span class="subtle small">初期値は非表示です。1問の制限時間が0以外なら、各問の残り時間は常に表示されます。</span></span>
+        </label>
       </div>
       <div class="stack">
         <strong>含めるデッキ（${selected.length}件）</strong>
@@ -1014,6 +1021,7 @@ function renderDailySettings() {
     const type = document.getElementById("daily-goal-type").value;
     document.getElementById("daily-count-wrap").hidden = type !== "COUNT";
     document.getElementById("daily-time-wrap").hidden = type !== "TIME";
+    document.getElementById("daily-overall-timer-wrap").hidden = type !== "TIME";
   };
   updateVisibility();
   document.getElementById("daily-goal-type").addEventListener("change", updateVisibility);
@@ -1022,6 +1030,7 @@ function renderDailySettings() {
     goalType: document.getElementById("daily-goal-type").value === "TIME" ? "TIME" : "COUNT",
     targetCount: clampInt(document.getElementById("daily-count").value, 1, 9999),
     targetMinutes: clampInt(document.getElementById("daily-minutes").value, 1, 600),
+    showOverallTimer: document.getElementById("daily-show-overall-timer").checked,
     deckIds: [...document.querySelectorAll("[data-daily-deck]:checked")].map(input => String(input.dataset.dailyDeck))
   });
 
@@ -1675,6 +1684,7 @@ function createDailyRoundConfig(settings, daily) {
     dailyTargetValue: daily.goalType === "TIME"
       ? clampInt(daily.targetMinutes, 1, 600) * 60
       : countTarget,
+    showDailyOverallTimer: Boolean(daily.showOverallTimer),
     errorMessage: insufficientForCount
       ? `デイリー対象カードが${ordered.length}枚しかありません。目標の${countTarget}枚以上になるよう、デッキを追加するか条件を変更してください。`
       : ""
@@ -2207,7 +2217,11 @@ function updateQuizHeaderUi(session) {
   const retry = document.getElementById("quiz-retry");
   const score = document.getElementById("quiz-score");
   if (!status) return;
-  if (session.isDailyTime) status.textContent = `デイリー 残り ${Math.ceil(session.globalRemaining)}秒・${session.logs.length}問`;
+  if (session.isDailyTime) {
+    status.textContent = session.config.showDailyOverallTimer
+      ? `デイリー 残り ${Math.ceil(session.globalRemaining)}秒・${session.logs.length}問`
+      : `デイリー（時間制）・${session.logs.length}問`;
+  }
   else if (session.isDailyCount) {
     const completed = session.logs.filter(log => log.correct).length;
     status.textContent = `デイリー ${Math.min(completed, session.config.dailyTargetValue)} / ${session.config.dailyTargetValue}枚`;
@@ -2219,7 +2233,8 @@ function updateQuizHeaderUi(session) {
     const total = [...session.threeCorrectCounts.values()].reduce((sum, value) => sum + value, 0);
     status.textContent = `残り ${session.threeCorrectQueue.length}語・累積 ${total}/${session.baseItems.length * THREE_CORRECT_TARGET}`;
   } else status.textContent = `${session.index + 1} / ${session.cycleItems.length}`;
-  status.className = (session.isTimeAttack && session.globalRemaining < 10) || (session.isDailyTime && session.globalRemaining < 60) ? "wrong" : "";
+  status.className = (session.isTimeAttack && session.globalRemaining < 10) ||
+    (session.isDailyTime && session.config.showDailyOverallTimer && session.globalRemaining < 60) ? "wrong" : "";
   combo.textContent = session.combo >= 2 ? `🔥 ${session.combo} COMBO` : "";
   attempt.textContent = session.phase === "ASKING" && session.config.maxAttempts > 1
     ? `挑戦 ${session.attemptNumber} / ${session.config.maxAttempts}` : "";
@@ -2233,7 +2248,7 @@ function updateQuizTimerUi(session) {
   if (!container) return;
 
   const rows = [];
-  if (session.isDailyTime) {
+  if (session.isDailyTime && session.config.showDailyOverallTimer) {
     const percent = Math.max(0, Math.min(100, (session.globalRemaining / session.globalLimit) * 100));
     rows.push(`
       <div class="timer-row">
