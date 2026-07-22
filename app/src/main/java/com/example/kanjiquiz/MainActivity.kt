@@ -101,7 +101,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.14"
+private const val APP_VERSION = "1.15"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -1455,11 +1455,19 @@ private fun DeckScreen(
                     TextButton(onClick = onDailySettings) { Text("設定") }
                 }
                 Button(
-                    onClick = onDailySettings,
-                    enabled = !dailyCompleted,
+                    onClick = if (dailyCompleted) onDailyStart else onDailySettings,
+                    enabled = dailyConfigured || !dailyCompleted,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(if (dailyCompleted) "今日は完了済み" else "設定して始める")
+                    Text(if (dailyCompleted) "もう一度デイリー" else "設定して始める")
+                }
+                if (dailyCompleted) {
+                    Text(
+                        "完了記録はそのまま維持され、再プレイは追加の練習として扱われます。",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
                 }
                 if (dailyMessage != null) {
                     Text(

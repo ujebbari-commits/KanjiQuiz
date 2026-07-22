@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.15";
+const APP_VERSION = "0.1.16";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -944,9 +944,10 @@ function renderHome() {
           </div>
           <button class="btn btn-ghost" id="daily-settings" type="button">設定</button>
         </div>
-        <button class="btn btn-primary btn-wide" id="daily-start" type="button" style="margin-top:10px" ${dailyDone ? "disabled" : ""}>
-          ${dailyDone ? "今日は完了済み" : "設定して始める"}
+        <button class="btn btn-primary btn-wide" id="daily-start" type="button" style="margin-top:10px">
+          ${dailyDone ? "もう一度デイリー" : "設定して始める"}
         </button>
+        ${dailyDone ? `<div class="subtle small" style="margin-top:6px">完了記録はそのまま維持され、再プレイは追加の練習として扱われます。</div>` : ""}
         <div id="daily-home-error"></div>
       </section>
       <button class="btn btn-primary btn-wide" id="open-import-new" type="button">デッキを読み込む</button>
@@ -956,7 +957,18 @@ function renderHome() {
   `);
 
   document.getElementById("daily-settings").addEventListener("click", () => navigate("dailySettings"));
-  document.getElementById("daily-start").addEventListener("click", () => navigate("dailySettings"));
+  document.getElementById("daily-start").addEventListener("click", () => {
+    if (!dailyDone) {
+      navigate("dailySettings");
+      return;
+    }
+    const config = createDailyRoundConfig(settings, daily);
+    if (!config.items.length) {
+      document.getElementById("daily-home-error").innerHTML = `<div class="error">${escapeHtml(config.errorMessage || "出題できるカードがありません。")}</div>`;
+      return;
+    }
+    startQuiz(config);
+  });
 
   document.getElementById("open-import-new")?.addEventListener("click", () => {
     resetImportState();

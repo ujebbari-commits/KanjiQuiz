@@ -59,7 +59,7 @@ app/src/main/java/com/example/kanjiquiz/MainActivity.kt   ← 全ロジック
 
 1. 依頼者は本プロジェクトを GitHub リポジトリに push する（Termux の git 経由で設定済み）。
 2. push すると `.github/workflows/build.yml` が走り、`gradle assembleDebug` で **debug APK** をビルド。
-3. 成果物は Actions の Artifacts に `KanjiQuiz-v1.14-apk` という名前で上がる（パス `app/build/outputs/apk/debug/app-debug.apk`）。
+3. 成果物は Actions の Artifacts に `KanjiQuiz-v1.15-apk` という名前で上がる（パス `app/build/outputs/apk/debug/app-debug.apk`）。
 4. 依頼者はそれをダウンロードして端末にインストール。
 
 - リポジトリ: `https://github.com/ujebbari-commits/KanjiQuiz.git`（GitHubユーザー名 `ujebbari-commits`）
@@ -301,3 +301,10 @@ git add -A && git commit -m "update" && git push
 - `DailyChallengeSettings.showOverallTimer` を追加。既定値は `false`。
 - 時間制デイリーでは、各問タイマー（`remaining`）を「現在の問題」として表示する。
 - デイリー全体タイマー（`globalRemaining`）は `showOverallTimer == true` の場合だけヘッダーと進捗バーに表示する。非表示でも内部計測と達成判定は止めない。
+
+
+## v1.15 / Web v0.1.16 追加仕様
+
+- デイリー完了済みの日は、ホームの主ボタンを「もう一度デイリー」に切り替える。
+- 押すと現在保存されているデイリー設定で直ちに再プレイする。
+- `dailyCompleted` は削除しない。再プレイを完了してもストリークや正式なデイリー履歴を重複加算しない。

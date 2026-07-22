@@ -1,4 +1,4 @@
-const CACHE_NAME = "kanjiquiz-web-v0.1.15";
+const CACHE_NAME = "kanjiquiz-web-v0.1.16";
 const ASSETS = [
   "./",
   "./index.html",
