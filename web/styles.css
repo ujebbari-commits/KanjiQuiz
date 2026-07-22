@@ -106,6 +106,30 @@ label > span:first-child { font-weight: 650; }
 }
 .chip.active { border-color: var(--primary); background: #3b2568; }
 
+
+.field-side-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+.field-side {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+.field-side-title {
+  font-weight: 750;
+  font-size: 1.02rem;
+}
+@media (max-width: 560px) {
+  .field-side-grid { grid-template-columns: 1fr; gap: 18px; }
+  .field-side + .field-side {
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+}
+
 .checkbox-list { display: grid; gap: 8px; }
 .check-row {
   display: grid;

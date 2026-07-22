@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.17";
+const APP_VERSION = "0.1.18";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -1301,17 +1301,17 @@ function renderFields() {
   const dailyKey = makeDailyKey(deck, prefs.qFields, prefs.aFields, settings.reverse);
   const dailyDone = settings.gameMode === "DAILY" && isDailyCompleted(dailyKey);
 
-  const fieldRows = deck.fields.map((name, index) => `
-    <div class="grid-2">
-      <label class="check-row">
-        <input type="checkbox" data-q-field="${index}" ${prefs.qFields.includes(index) ? "checked" : ""}>
-        <span><strong>${escapeHtml(name)}</strong><br><span class="field-sample">${textHtml(cleanText(sample[index] ?? ""))}</span></span>
-      </label>
-      <label class="check-row">
-        <input type="checkbox" data-a-field="${index}" ${prefs.aFields.includes(index) ? "checked" : ""}>
-        <span><strong>${escapeHtml(name)}</strong><br><span class="field-sample">${textHtml(cleanText(sample[index] ?? ""))}</span></span>
-      </label>
-    </div>`).join("");
+  const questionFieldRows = deck.fields.map((name, index) => `
+    <label class="check-row">
+      <input type="checkbox" data-q-field="${index}" ${prefs.qFields.includes(index) ? "checked" : ""}>
+      <span><strong>${escapeHtml(name)}</strong><br><span class="field-sample">${textHtml(cleanText(sample[index] ?? ""))}</span></span>
+    </label>`).join("");
+
+  const answerFieldRows = deck.fields.map((name, index) => `
+    <label class="check-row">
+      <input type="checkbox" data-a-field="${index}" ${prefs.aFields.includes(index) ? "checked" : ""}>
+      <span><strong>${escapeHtml(name)}</strong><br><span class="field-sample">${textHtml(cleanText(sample[index] ?? ""))}</span></span>
+    </label>`).join("");
 
   app.innerHTML = shell(deck.name, `
     <div class="stack">
@@ -1324,8 +1324,19 @@ function renderFields() {
       </div>
 
       <div class="card stack">
-        <div class="grid-2"><strong>問題側</strong><strong>こたえ側</strong></div>
-        ${fieldRows}
+        <strong>フィールド選択</strong>
+        <div class="field-side-grid">
+          <section class="field-side">
+            <div class="field-side-title">問題側</div>
+            <div class="subtle small">問題として表示するフィールド</div>
+            <div class="checkbox-list">${questionFieldRows}</div>
+          </section>
+          <section class="field-side">
+            <div class="field-side-title">こたえ側</div>
+            <div class="subtle small">正解として使うフィールド</div>
+            <div class="checkbox-list">${answerFieldRows}</div>
+          </section>
+        </div>
       </div>
 
       <div class="card stack">
