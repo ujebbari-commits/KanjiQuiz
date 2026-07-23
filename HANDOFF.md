@@ -59,7 +59,7 @@ app/src/main/java/com/example/kanjiquiz/MainActivity.kt   ← 全ロジック
 
 1. 依頼者は本プロジェクトを GitHub リポジトリに push する（Termux の git 経由で設定済み）。
 2. push すると `.github/workflows/build.yml` が走り、`gradle assembleDebug` で **debug APK** をビルド。
-3. 成果物は Actions の Artifacts に `KanjiQuiz-v1.15-apk` という名前で上がる（パス `app/build/outputs/apk/debug/app-debug.apk`）。
+3. 成果物は Actions の Artifacts に `KanjiQuiz-v1.17-apk` という名前で上がる（パス `app/build/outputs/apk/debug/app-debug.apk`）。
 4. 依頼者はそれをダウンロードして端末にインストール。
 
 - リポジトリ: `https://github.com/ujebbari-commits/KanjiQuiz.git`（GitHubユーザー名 `ujebbari-commits`）
@@ -313,3 +313,17 @@ git add -A && git commit -m "update" && git push
 ## v1.16 / Web v0.1.17 追加仕様
 
 - デイリー中の左上ステータスは「デイリー・回答 N問」。達成枚数・全体残り時間は既存の進捗バー側だけに表示し、重複を避ける。バーのロジックは未変更。
+
+
+## v1.16 / Web v0.1.18 追加修正
+
+- Web版フィールド選択画面で、問題側とこたえ側を独立した一覧に分離。モバイル時に見出しと一覧がずれる不具合を修正。
+
+
+## v1.17 / Web v0.1.19 追加事項
+
+- めくりモードの自動読み上げを実装。Androidは標準 `TextToSpeech`、Webは `SpeechSynthesisUtterance` を使用し、追加ライブラリなし。
+- 設定: 読み上げON/OFF、両面/表面/裏面、速度、表面後・裏面後の待ち時間、同一カードの繰り返し、括弧内注釈。
+- 読み上げONでは裏面を最初は隠し、表面読み上げ→待機→裏面表示・読み上げ→待機→次カード。OFFでは従来どおり表裏を同時表示。
+- Android Manifestの `<queries>` に `android.intent.action.TTS_SERVICE` を追加。
+- 読み上げ用テキストではHTMLタグ・`[sound:]`・ピッチアクセント矢印を除去する。元のカード表示内容は変更しない。

@@ -6,6 +6,10 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -49,6 +53,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -71,6 +76,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -83,6 +89,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -101,7 +108,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.16"
+private const val APP_VERSION = "1.17"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -110,6 +117,7 @@ private const val THREE_CORRECT_TARGET = 3
 enum class GameMode { NORMAL, SURVIVAL, TIME_ATTACK, THREE_CORRECT, MASTERY, WEAK_CHALLENGE, DAILY }
 enum class Mode { QUIZ, FLASHCARD }
 enum class DailyGoalType { COUNT, TIME }
+enum class FlashSpeechTarget { BOTH, FRONT, BACK }
 
 data class Settings(
     val count: Int = 10,
@@ -117,6 +125,13 @@ data class Settings(
     val autoAdvance: Boolean = true,
     val feedbackDeci: Int = 15,
     val flashcardDeci: Int = 30,
+    val flashSpeechEnabled: Boolean = false,
+    val flashSpeechTarget: FlashSpeechTarget = FlashSpeechTarget.BOTH,
+    val flashSpeechRatePercent: Int = 100,
+    val flashFrontWaitDeci: Int = 30,
+    val flashBackWaitDeci: Int = 40,
+    val flashRepeatCount: Int = 1,
+    val flashSpeechReadParentheses: Boolean = false,
     val reverse: Boolean = false,
     val gameMode: GameMode = GameMode.NORMAL,
     val weakPriority: Boolean = true,
@@ -194,6 +209,15 @@ class Store(context: Context) {
         autoAdvance = sp.getBoolean("autoAdvance", true),
         feedbackDeci = sp.getInt("feedbackDeci", 15),
         flashcardDeci = sp.getInt("flashcardDeci", 30),
+        flashSpeechEnabled = sp.getBoolean("flashSpeechEnabled", false),
+        flashSpeechTarget = runCatching {
+            FlashSpeechTarget.valueOf(sp.getString("flashSpeechTarget", FlashSpeechTarget.BOTH.name)!!)
+        }.getOrDefault(FlashSpeechTarget.BOTH),
+        flashSpeechRatePercent = sp.getInt("flashSpeechRatePercent", 100).coerceIn(50, 200),
+        flashFrontWaitDeci = sp.getInt("flashFrontWaitDeci", 30).coerceIn(0, 600),
+        flashBackWaitDeci = sp.getInt("flashBackWaitDeci", 40).coerceIn(0, 600),
+        flashRepeatCount = sp.getInt("flashRepeatCount", 1).coerceIn(1, 9),
+        flashSpeechReadParentheses = sp.getBoolean("flashSpeechReadParentheses", false),
         reverse = sp.getBoolean("reverse", false),
         gameMode = runCatching { GameMode.valueOf(sp.getString("gameMode", "NORMAL")!!) }
             .getOrDefault(GameMode.NORMAL)
@@ -212,6 +236,13 @@ class Store(context: Context) {
             .putBoolean("autoAdvance", s.autoAdvance)
             .putInt("feedbackDeci", s.feedbackDeci)
             .putInt("flashcardDeci", s.flashcardDeci)
+            .putBoolean("flashSpeechEnabled", s.flashSpeechEnabled)
+            .putString("flashSpeechTarget", s.flashSpeechTarget.name)
+            .putInt("flashSpeechRatePercent", s.flashSpeechRatePercent.coerceIn(50, 200))
+            .putInt("flashFrontWaitDeci", s.flashFrontWaitDeci.coerceIn(0, 600))
+            .putInt("flashBackWaitDeci", s.flashBackWaitDeci.coerceIn(0, 600))
+            .putInt("flashRepeatCount", s.flashRepeatCount.coerceIn(1, 9))
+            .putBoolean("flashSpeechReadParentheses", s.flashSpeechReadParentheses)
             .putBoolean("reverse", s.reverse)
             .putString("gameMode", s.gameMode.name)
             .putBoolean("weakPriority", s.weakPriority)
@@ -1291,6 +1322,13 @@ private fun App() {
             FlashcardScreen(
                 items = flashItems,
                 secDeci = settings.flashcardDeci,
+                speechEnabled = settings.flashSpeechEnabled,
+                speechTarget = settings.flashSpeechTarget,
+                speechRatePercent = settings.flashSpeechRatePercent,
+                frontWaitDeci = settings.flashFrontWaitDeci,
+                backWaitDeci = settings.flashBackWaitDeci,
+                repeatCount = settings.flashRepeatCount,
+                readParentheses = settings.flashSpeechReadParentheses,
                 initialFontSizeSp = settings.gameFontSizeSp,
                 onGameFontSizeChanged = { size ->
                     settings = settings.copy(gameFontSizeSp = size)
@@ -1735,9 +1773,77 @@ private fun SettingsScreen(
         }
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-        ChipRow("めくりモード：1枚の表示時間",
+        ChipRow("めくりモード：1枚の表示時間（読み上げOFF時）",
             listOf("2秒" to 20, "3秒" to 30, "5秒" to 50, "8秒" to 80),
             settings.flashcardDeci) { onChange(settings.copy(flashcardDeci = it)) }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("めくりモードで自動読み上げ", fontWeight = FontWeight.Bold)
+                Text(
+                    "表面を読み、待機してから裏面を読み、次のカードへ進みます。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = settings.flashSpeechEnabled,
+                onCheckedChange = { onChange(settings.copy(flashSpeechEnabled = it)) },
+            )
+        }
+        if (settings.flashSpeechEnabled) {
+            ChipRow(
+                "読み上げる面",
+                listOf(
+                    "両方" to FlashSpeechTarget.BOTH,
+                    "表面だけ" to FlashSpeechTarget.FRONT,
+                    "裏面だけ" to FlashSpeechTarget.BACK,
+                ),
+                settings.flashSpeechTarget,
+            ) { onChange(settings.copy(flashSpeechTarget = it)) }
+            ChipRow(
+                "読み上げ速度",
+                listOf("0.75倍" to 75, "1.0倍" to 100, "1.25倍" to 125, "1.5倍" to 150),
+                settings.flashSpeechRatePercent,
+            ) { onChange(settings.copy(flashSpeechRatePercent = it)) }
+            ChipRow(
+                "表面の後に待つ時間",
+                listOf("0秒" to 0, "1秒" to 10, "3秒" to 30, "5秒" to 50, "8秒" to 80),
+                settings.flashFrontWaitDeci,
+            ) { onChange(settings.copy(flashFrontWaitDeci = it)) }
+            ChipRow(
+                "裏面の後に待つ時間",
+                listOf("0秒" to 0, "1秒" to 10, "3秒" to 30, "4秒" to 40, "8秒" to 80),
+                settings.flashBackWaitDeci,
+            ) { onChange(settings.copy(flashBackWaitDeci = it)) }
+            ChipRow(
+                "同じカードの繰り返し",
+                listOf("1回" to 1, "2回" to 2, "3回" to 3),
+                settings.flashRepeatCount,
+            ) { onChange(settings.copy(flashRepeatCount = it)) }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("括弧内の注釈も読む", fontWeight = FontWeight.Bold)
+                    Text(
+                        "オフでは（例）や補足説明を読み上げから除外します。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = settings.flashSpeechReadParentheses,
+                    onCheckedChange = { onChange(settings.copy(flashSpeechReadParentheses = it)) },
+                )
+            }
+        }
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
         Row(
@@ -3066,17 +3172,87 @@ private fun QuizScreen(
 private fun FlashcardScreen(
     items: List<Pair<String, String>>,
     secDeci: Int,
+    speechEnabled: Boolean,
+    speechTarget: FlashSpeechTarget,
+    speechRatePercent: Int,
+    frontWaitDeci: Int,
+    backWaitDeci: Int,
+    repeatCount: Int,
+    readParentheses: Boolean,
     initialFontSizeSp: Int,
     onGameFontSizeChanged: (Int) -> Unit,
     onDone: () -> Unit,
 ) {
-    BackHandler { onDone() }
-    val perCardMillis = secDeci * 100L
+    val context = LocalContext.current
+    val view = LocalView.current
+    val handler = remember { Handler(Looper.getMainLooper()) }
+    var ttsReady by remember { mutableStateOf(false) }
+    var ttsFailed by remember { mutableStateOf(false) }
+    var completedUtteranceId by remember { mutableStateOf<String?>(null) }
+    val tts = remember {
+        TextToSpeech(context.applicationContext) { status ->
+            handler.post {
+                ttsReady = status == TextToSpeech.SUCCESS
+                ttsFailed = status != TextToSpeech.SUCCESS
+            }
+        }
+    }
+
+    DisposableEffect(speechEnabled, view) {
+        val previousKeepScreenOn = view.keepScreenOn
+        if (speechEnabled) view.keepScreenOn = true
+        onDispose { view.keepScreenOn = previousKeepScreenOn }
+    }
+
+    DisposableEffect(tts) {
+        tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) = Unit
+            override fun onDone(utteranceId: String?) {
+                handler.post { completedUtteranceId = utteranceId }
+            }
+            override fun onError(utteranceId: String?) {
+                handler.post { completedUtteranceId = utteranceId }
+            }
+            override fun onError(utteranceId: String?, errorCode: Int) {
+                handler.post { completedUtteranceId = utteranceId }
+            }
+        })
+        onDispose {
+            tts.stop()
+            tts.shutdown()
+        }
+    }
+
+    LaunchedEffect(ttsReady, speechRatePercent) {
+        if (!ttsReady) return@LaunchedEffect
+        val languageResult = tts.setLanguage(Locale.JAPANESE)
+        if (languageResult == TextToSpeech.LANG_MISSING_DATA ||
+            languageResult == TextToSpeech.LANG_NOT_SUPPORTED
+        ) {
+            ttsReady = false
+            ttsFailed = true
+        } else {
+            tts.setSpeechRate(speechRatePercent.coerceIn(50, 200) / 100f)
+        }
+    }
+
+    fun stopAndDone() {
+        tts.stop()
+        onDone()
+    }
+    BackHandler { stopAndDone() }
+
+    val perCardMillis = secDeci.coerceAtLeast(3) * 100L
     var index by remember { mutableIntStateOf(0) }
     var elapsed by remember { mutableFloatStateOf(0f) }
     var paused by remember { mutableStateOf(false) }
     var finished by remember { mutableStateOf(false) }
+    var showingBack by remember { mutableStateOf(false) }
+    var repeatIndex by remember { mutableIntStateOf(1) }
+    var replayToken by remember { mutableIntStateOf(0) }
     var gameFontSizeSp by remember { mutableIntStateOf(initialFontSizeSp.coerceIn(16, 96)) }
+
+    val effectiveSpeech = speechEnabled && !ttsFailed
 
     fun changeGameFontSize(delta: Int) {
         val next = (gameFontSizeSp + delta).coerceIn(16, 96)
@@ -3086,12 +3262,110 @@ private fun FlashcardScreen(
         }
     }
 
-    fun toCard(i: Int) { index = i; elapsed = 0f }
+    fun toCard(i: Int) {
+        tts.stop()
+        index = i.coerceIn(0, items.lastIndex)
+        elapsed = 0f
+        showingBack = false
+        repeatIndex = 1
+        completedUtteranceId = null
+    }
 
-    LaunchedEffect(index, paused, finished) {
+    fun goForward() {
+        tts.stop()
+        if (index + 1 >= items.size) {
+            finished = true
+        } else {
+            toCard(index + 1)
+        }
+    }
+
+    fun speechText(raw: String): String {
+        var value = cleanText(raw)
+            .replace('↑', ' ')
+            .replace('↓', ' ')
+            .replace("/", "、")
+            .replace("\\", "、")
+        if (!readParentheses) {
+            value = value.replace(Regex("[（(][^）)]*[）)]"), " ")
+        }
+        return value
+            .replace("\n", "。")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    suspend fun speakAndWait(raw: String, label: String) {
+        if (!effectiveSpeech || !ttsReady) return
+        val text = speechText(raw)
+        if (text.isBlank()) return
+        val utteranceId = "$label-${System.nanoTime()}"
+        completedUtteranceId = null
+        tts.setSpeechRate(speechRatePercent.coerceIn(50, 200) / 100f)
+        val result = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+        if (result == TextToSpeech.ERROR) return
+        withTimeoutOrNull(120_000L) {
+            while (completedUtteranceId != utteranceId) delay(50)
+        }
+    }
+
+    suspend fun waitWithProgress(durationMillis: Long) {
+        elapsed = 0f
+        if (durationMillis <= 0L) return
+        while (elapsed < durationMillis) {
+            delay(50)
+            elapsed += 50f
+        }
+    }
+
+    LaunchedEffect(
+        index,
+        paused,
+        finished,
+        effectiveSpeech,
+        ttsReady,
+        showingBack,
+        repeatIndex,
+        replayToken,
+        speechTarget,
+        speechRatePercent,
+        frontWaitDeci,
+        backWaitDeci,
+        repeatCount,
+        readParentheses,
+    ) {
         if (finished || paused) return@LaunchedEffect
-        while (elapsed < perCardMillis) { delay(50); elapsed += 50 }
-        if (index + 1 >= items.size) finished = true else toCard(index + 1)
+        if (!effectiveSpeech) {
+            while (elapsed < perCardMillis) {
+                delay(50)
+                elapsed += 50f
+            }
+            goForward()
+            return@LaunchedEffect
+        }
+        if (!ttsReady) return@LaunchedEffect
+
+        val (front, back) = items[index]
+        if (!showingBack) {
+            if (speechTarget != FlashSpeechTarget.BACK) {
+                speakAndWait(front, "front-$index-$repeatIndex-$replayToken")
+            }
+            waitWithProgress(frontWaitDeci.coerceIn(0, 600) * 100L)
+            showingBack = true
+            elapsed = 0f
+        } else {
+            if (speechTarget != FlashSpeechTarget.FRONT) {
+                speakAndWait(back, "back-$index-$repeatIndex-$replayToken")
+            }
+            waitWithProgress(backWaitDeci.coerceIn(0, 600) * 100L)
+            if (repeatIndex < repeatCount.coerceIn(1, 9)) {
+                repeatIndex += 1
+                showingBack = false
+                elapsed = 0f
+            } else {
+                goForward()
+            }
+        }
     }
 
     if (finished) {
@@ -3104,23 +3378,46 @@ private fun FlashcardScreen(
             Spacer(Modifier.height(8.dp))
             Text("${items.size}枚めくりました", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(24.dp))
-            Button(onClick = { toCard(0); finished = false }, modifier = Modifier.fillMaxWidth()) {
-                Text("もう一回")
-            }
+            Button(
+                onClick = {
+                    finished = false
+                    paused = false
+                    toCard(0)
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("もう一回") }
             Spacer(Modifier.height(8.dp))
-            OutlinedButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text("もどる") }
+            OutlinedButton(onClick = { stopAndDone() }, modifier = Modifier.fillMaxWidth()) {
+                Text("もどる")
+            }
         }
         return
     }
 
     val (front, back) = items[index]
+    val progressTotal = when {
+        !effectiveSpeech -> perCardMillis
+        showingBack -> backWaitDeci.coerceIn(0, 600) * 100L
+        else -> frontWaitDeci.coerceIn(0, 600) * 100L
+    }.coerceAtLeast(1L)
+    val progress = (elapsed / progressTotal).coerceIn(0f, 1f)
+
     Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("${index + 1} / ${items.size}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column {
+                Text("${index + 1} / ${items.size}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (effectiveSpeech) {
+                    Text(
+                        if (showingBack) "裏面・${repeatIndex}/${repeatCount.coerceIn(1, 9)}回" else "表面・${repeatIndex}/${repeatCount.coerceIn(1, 9)}回",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = { changeGameFontSize(-4) }, enabled = gameFontSizeSp > 16) {
                     Text("A−")
@@ -3129,20 +3426,38 @@ private fun FlashcardScreen(
                 TextButton(onClick = { changeGameFontSize(4) }, enabled = gameFontSizeSp < 96) {
                     Text("A＋")
                 }
-                TextButton(onClick = onDone) { Text("やめる") }
+                TextButton(onClick = { stopAndDone() }) { Text("やめる") }
             }
         }
         Spacer(Modifier.height(8.dp))
         LinearProgressIndicator(
-            progress = { (elapsed / perCardMillis).coerceIn(0f, 1f) },
+            progress = { progress },
             modifier = Modifier.fillMaxWidth().height(6.dp),
         )
+        if (speechEnabled && !ttsReady && !ttsFailed) {
+            Text(
+                "読み上げを準備中…",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else if (speechEnabled && ttsFailed) {
+            Text(
+                "日本語の読み上げを利用できないため、通常の自動めくりで再生しています。",
+                fontSize = 12.sp,
+                color = ComboOrange,
+            )
+        }
         Box(
-            modifier = Modifier.weight(1f).fillMaxWidth().clickable { paused = !paused },
+            modifier = Modifier.weight(1f).fillMaxWidth().clickable {
+                paused = !paused
+                if (paused) tts.stop()
+            },
             contentAlignment = Alignment.Center,
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.verticalScroll(rememberScrollState())) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
                 SelectionContainer {
                     Text(
                         front,
@@ -3152,41 +3467,57 @@ private fun FlashcardScreen(
                         textAlign = TextAlign.Center,
                     )
                 }
-                Spacer(Modifier.height(16.dp))
-                HorizontalDivider(modifier = Modifier.fillMaxWidth().padding(horizontal = 40.dp))
-                Spacer(Modifier.height(16.dp))
-                SelectionContainer {
-                    Text(
-                        back,
-                        fontSize = (gameFontSizeSp * 0.60f).coerceAtLeast(16f).sp,
-                        lineHeight = (gameFontSizeSp * 0.82f).coerceAtLeast(22f).sp,
-                        textAlign = TextAlign.Center,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                if (!effectiveSpeech || showingBack) {
+                    Spacer(Modifier.height(16.dp))
+                    HorizontalDivider(modifier = Modifier.fillMaxWidth().padding(horizontal = 40.dp))
+                    Spacer(Modifier.height(16.dp))
+                    SelectionContainer {
+                        Text(
+                            back,
+                            fontSize = (gameFontSizeSp * 0.60f).coerceAtLeast(16f).sp,
+                            lineHeight = (gameFontSizeSp * 0.82f).coerceAtLeast(22f).sp,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 if (paused) {
                     Spacer(Modifier.height(16.dp))
-                    Text("⏸ 一時停止中（タップで再開）", fontSize = 13.sp, color = ComboOrange)
+                    Text("⏸ 一時停止中", fontSize = 13.sp, color = ComboOrange)
                 }
             }
+        }
+        if (effectiveSpeech) {
+            OutlinedButton(
+                onClick = {
+                    tts.stop()
+                    elapsed = 0f
+                    replayToken += 1
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (showingBack) "裏面をもう一度読む" else "表面をもう一度読む")
+            }
+            Spacer(Modifier.height(8.dp))
         }
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            OutlinedButton(onClick = { if (index > 0) toCard(index - 1) }, enabled = index > 0) {
-                Text("← 前")
-            }
-            TextButton(onClick = { paused = !paused }) { Text(if (paused) "▶ 再開" else "⏸ 停止") }
-            OutlinedButton(onClick = {
-                if (index + 1 >= items.size) finished = true else toCard(index + 1)
-            }) { Text("次 →") }
+            OutlinedButton(
+                onClick = { if (index > 0) toCard(index - 1) },
+                enabled = index > 0,
+            ) { Text("← 前") }
+            TextButton(onClick = {
+                paused = !paused
+                if (paused) tts.stop()
+            }) { Text(if (paused) "▶ 再開" else "⏸ 停止") }
+            OutlinedButton(onClick = { goForward() }) { Text("次 →") }
         }
         Spacer(Modifier.height(8.dp))
     }
 }
-
 @Composable
 private fun ResultScreen(
     logs: List<AnswerLog>,

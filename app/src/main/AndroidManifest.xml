@@ -7,6 +7,9 @@
     <!-- Android 11以降でAnkiDroidを見つけるための宣言 -->
     <queries>
         <package android:name="com.ichi2.anki" />
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
 
     <application

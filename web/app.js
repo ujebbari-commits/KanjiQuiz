@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.18";
+const APP_VERSION = "0.1.19";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -24,6 +24,13 @@ const DEFAULT_SETTINGS = {
   autoAdvance: true,
   feedbackDeci: 15,
   flashcardDeci: 30,
+  flashSpeechEnabled: false,
+  flashSpeechTarget: "BOTH",
+  flashSpeechRate: 1,
+  flashFrontWaitDeci: 30,
+  flashBackWaitDeci: 40,
+  flashRepeatCount: 1,
+  flashSpeechReadParentheses: false,
   reverse: false,
   gameMode: "NORMAL",
   weakPriority: true,
@@ -120,6 +127,15 @@ function loadSettings() {
     maxAttempts: clampInt(saved.maxAttempts ?? DEFAULT_SETTINGS.maxAttempts, 1, 99),
     feedbackDeci: clampInt(saved.feedbackDeci ?? DEFAULT_SETTINGS.feedbackDeci, 1, 600),
     flashcardDeci: clampInt(saved.flashcardDeci ?? DEFAULT_SETTINGS.flashcardDeci, 3, 600),
+    flashSpeechEnabled: Boolean(saved.flashSpeechEnabled),
+    flashSpeechTarget: ["BOTH", "FRONT", "BACK"].includes(saved.flashSpeechTarget)
+      ? saved.flashSpeechTarget
+      : DEFAULT_SETTINGS.flashSpeechTarget,
+    flashSpeechRate: Math.min(2, Math.max(0.5, Number(saved.flashSpeechRate ?? DEFAULT_SETTINGS.flashSpeechRate) || 1)),
+    flashFrontWaitDeci: clampInt(saved.flashFrontWaitDeci ?? DEFAULT_SETTINGS.flashFrontWaitDeci, 0, 600),
+    flashBackWaitDeci: clampInt(saved.flashBackWaitDeci ?? DEFAULT_SETTINGS.flashBackWaitDeci, 0, 600),
+    flashRepeatCount: clampInt(saved.flashRepeatCount ?? DEFAULT_SETTINGS.flashRepeatCount, 1, 9),
+    flashSpeechReadParentheses: Boolean(saved.flashSpeechReadParentheses),
     gameFontSize: clampInt(saved.gameFontSize ?? DEFAULT_SETTINGS.gameFontSize, 16, 96),
     gameMode: saved.gameMode === "DAILY" ? "NORMAL" : (saved.gameMode || DEFAULT_SETTINGS.gameMode),
     newOnly: Boolean(saved.newOnly)
@@ -1472,7 +1488,7 @@ function renderFields() {
         errorBox.innerHTML = `<div class="error">この組み合わせでは表示できるカードがありません。</div>`;
         return;
       }
-      startFlash(items, nextSettings.flashcardDeci, nextSettings.gameFontSize);
+      startFlash(items, nextSettings);
       return;
     }
     const config = createRoundConfig(deck, prefs, nextSettings);
@@ -2490,20 +2506,59 @@ function renderResult() {
   });
 }
 
-function startFlash(items, secDeci, gameFontSize) {
+function flashSpeechText(value, readParentheses) {
+  let text = cleanText(value)
+    .replace(/[↑↓]/g, " ")
+    .replace(/[\\/]/g, "、");
+  if (!readParentheses) {
+    text = text.replace(/[（(][^）)]*[）)]/g, " ");
+  }
+  return text
+    .replace(/\n+/g, "。")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cancelFlashSpeech() {
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+}
+
+function startFlash(items, settings) {
   state.flash?.stop();
+  const speechRequested = Boolean(settings.flashSpeechEnabled);
+  const speechSupported = "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
   state.flash = {
     items,
     index: 0,
     paused: false,
-    secDeci,
-    gameFontSize: clampInt(gameFontSize, 16, 96),
+    secDeci: settings.flashcardDeci,
+    gameFontSize: clampInt(settings.gameFontSize, 16, 96),
+    speechRequested,
+    speechEnabled: speechRequested && speechSupported,
+    speechTarget: ["BOTH", "FRONT", "BACK"].includes(settings.flashSpeechTarget)
+      ? settings.flashSpeechTarget
+      : "BOTH",
+    speechRate: Math.min(2, Math.max(0.5, Number(settings.flashSpeechRate) || 1)),
+    frontWaitDeci: clampInt(settings.flashFrontWaitDeci, 0, 600),
+    backWaitDeci: clampInt(settings.flashBackWaitDeci, 0, 600),
+    repeatCount: clampInt(settings.flashRepeatCount, 1, 9),
+    readParentheses: Boolean(settings.flashSpeechReadParentheses),
+    phase: "FRONT",
+    repeatIndex: 1,
+    speaking: false,
+    speechToken: 0,
+    speechWatchdogId: null,
     timerId: null,
-    remainingMs: secDeci * 100,
+    remainingMs: settings.flashcardDeci * 100,
     lastTick: performance.now(),
     stop() {
       if (this.timerId != null) clearInterval(this.timerId);
       this.timerId = null;
+      this.speechToken += 1;
+      this.speaking = false;
+      if (this.speechWatchdogId != null) clearTimeout(this.speechWatchdogId);
+      this.speechWatchdogId = null;
+      cancelFlashSpeech();
     }
   };
   navigate("flash");
@@ -2512,10 +2567,14 @@ function startFlash(items, secDeci, gameFontSize) {
 function renderFlash() {
   const flash = state.flash;
   if (!flash) return navigate("home", { push: false });
+  const speechSupported = "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
   app.innerHTML = `
     <main class="app-shell flash-shell" style="${gameFontStyle(flash.gameFontSize)}">
       <div class="quiz-header">
-        <div id="flash-count"></div>
+        <div>
+          <div id="flash-count"></div>
+          <div id="flash-phase" class="small subtle"></div>
+        </div>
         <div class="row row-wrap font-controls">
           <button class="btn btn-ghost font-step" id="flash-font-smaller" type="button">A−</button>
           <span id="flash-font-label" class="small">${flash.gameFontSize}px</span>
@@ -2524,7 +2583,11 @@ function renderFlash() {
         </div>
       </div>
       <div id="flash-progress"></div>
+      ${flash.speechRequested && !flash.speechEnabled
+        ? `<div class="error small">このブラウザーでは読み上げを利用できないため、通常の自動めくりで再生します。</div>`
+        : ""}
       <section class="flash-content" id="flash-content"></section>
+      <button class="btn btn-ghost btn-wide" id="flash-repeat-speech" type="button" hidden>現在の面をもう一度読む</button>
       <div class="grid-3">
         <button class="btn btn-ghost" id="flash-prev" type="button">前へ</button>
         <button class="btn btn-primary" id="flash-pause" type="button">一時停止</button>
@@ -2553,23 +2616,93 @@ function renderFlash() {
   document.getElementById("flash-next").addEventListener("click", () => changeFlash(1));
   document.getElementById("flash-pause").addEventListener("click", () => {
     flash.paused = !flash.paused;
+    cancelFlashSpeech();
+    flash.speaking = false;
+    flash.speechToken += 1;
     flash.lastTick = performance.now();
+    if (!flash.paused) beginFlashPhase({ preserveWait: true });
     updateFlashUi();
   });
-  renderFlashCard();
-  flash.lastTick = performance.now();
+  document.getElementById("flash-repeat-speech").addEventListener("click", () => {
+    if (!flash.speechEnabled || !speechSupported) return;
+    beginFlashPhase({ preserveWait: false });
+  });
+  resetFlashCard();
   flash.timerId = setInterval(tickFlash, 100);
 }
 
-function renderFlashCard() {
+function resetFlashCard() {
   const flash = state.flash;
+  if (!flash) return;
+  flash.phase = "FRONT";
+  flash.repeatIndex = 1;
+  flash.remainingMs = flash.speechEnabled ? flash.frontWaitDeci * 100 : flash.secDeci * 100;
+  flash.lastTick = performance.now();
+  renderFlashCardContent();
+  beginFlashPhase({ preserveWait: true });
+}
+
+function renderFlashCardContent() {
+  const flash = state.flash;
+  if (!flash) return;
   const item = flash.items[flash.index];
-  flash.remainingMs = flash.secDeci * 100;
+  const revealBack = !flash.speechEnabled || flash.phase === "BACK";
   document.getElementById("flash-content").innerHTML = `
     <div class="stack">
       <div class="selectable flash-question">${textHtml(item.question)}</div>
-      <div class="selectable flash-answer">${textHtml(item.answer)}</div>
+      ${revealBack ? `<div class="selectable flash-answer">${textHtml(item.answer)}</div>` : ""}
     </div>`;
+  updateFlashUi();
+}
+
+function beginFlashPhase({ preserveWait = false } = {}) {
+  const flash = state.flash;
+  if (!flash || flash.paused) return;
+  cancelFlashSpeech();
+  if (flash.speechWatchdogId != null) clearTimeout(flash.speechWatchdogId);
+  flash.speechWatchdogId = null;
+  flash.speechToken += 1;
+  const token = flash.speechToken;
+  flash.speaking = false;
+  flash.lastTick = performance.now();
+
+  if (!flash.speechEnabled || !("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+    if (!preserveWait) flash.remainingMs = flash.secDeci * 100;
+    updateFlashUi();
+    return;
+  }
+
+  if (!preserveWait) {
+    flash.remainingMs = (flash.phase === "FRONT" ? flash.frontWaitDeci : flash.backWaitDeci) * 100;
+  }
+  const item = flash.items[flash.index];
+  const shouldSpeak = flash.phase === "FRONT"
+    ? flash.speechTarget !== "BACK"
+    : flash.speechTarget !== "FRONT";
+  const raw = flash.phase === "FRONT" ? item.question : item.answer;
+  const text = flashSpeechText(raw, flash.readParentheses);
+  if (!shouldSpeak || !text) {
+    updateFlashUi();
+    return;
+  }
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "ja-JP";
+  utterance.rate = flash.speechRate;
+  const finishSpeech = () => {
+    if (!state.flash || state.flash !== flash || flash.speechToken !== token) return;
+    if (flash.speechWatchdogId != null) clearTimeout(flash.speechWatchdogId);
+    flash.speechWatchdogId = null;
+    flash.speaking = false;
+    flash.lastTick = performance.now();
+    updateFlashUi();
+  };
+  utterance.onend = finishSpeech;
+  utterance.onerror = finishSpeech;
+  flash.speaking = true;
+  const estimatedMs = Math.max(5000, Math.min(60000, Math.round(text.length * 420 / flash.speechRate + 3000)));
+  flash.speechWatchdogId = setTimeout(finishSpeech, estimatedMs);
+  window.speechSynthesis.speak(utterance);
   updateFlashUi();
 }
 
@@ -2579,36 +2712,79 @@ function tickFlash() {
     if (flash) flash.lastTick = performance.now();
     return;
   }
+  if (flash.speaking) {
+    flash.lastTick = performance.now();
+    return;
+  }
   const now = performance.now();
   const delta = now - flash.lastTick;
   flash.lastTick = now;
   flash.remainingMs -= delta;
-  if (flash.remainingMs <= 0) changeFlash(1);
+  if (flash.remainingMs <= 0) advanceFlashPhase();
   else updateFlashUi();
+}
+
+function advanceFlashPhase() {
+  const flash = state.flash;
+  if (!flash) return;
+  if (!flash.speechEnabled || !("speechSynthesis" in window)) {
+    changeFlash(1);
+    return;
+  }
+  if (flash.phase === "FRONT") {
+    flash.phase = "BACK";
+    flash.remainingMs = flash.backWaitDeci * 100;
+    renderFlashCardContent();
+    beginFlashPhase({ preserveWait: true });
+    return;
+  }
+  if (flash.repeatIndex < flash.repeatCount) {
+    flash.repeatIndex += 1;
+    flash.phase = "FRONT";
+    flash.remainingMs = flash.frontWaitDeci * 100;
+    renderFlashCardContent();
+    beginFlashPhase({ preserveWait: true });
+    return;
+  }
+  changeFlash(1);
 }
 
 function changeFlash(delta) {
   const flash = state.flash;
   if (!flash) return;
+  cancelFlashSpeech();
+  if (flash.speechWatchdogId != null) clearTimeout(flash.speechWatchdogId);
+  flash.speechWatchdogId = null;
+  flash.speechToken += 1;
+  flash.speaking = false;
   const next = flash.index + delta;
   if (next < 0) flash.index = 0;
   else if (next >= flash.items.length) {
     flash.stop(); state.flash = null; navigate("fields"); return;
   } else flash.index = next;
-  flash.lastTick = performance.now();
-  renderFlashCard();
+  resetFlashCard();
 }
 
 function updateFlashUi() {
   const flash = state.flash;
   if (!flash) return;
   document.getElementById("flash-count").textContent = `${flash.index + 1} / ${flash.items.length}`;
+  const speechActive = flash.speechEnabled && "speechSynthesis" in window;
+  document.getElementById("flash-phase").textContent = speechActive
+    ? `${flash.phase === "FRONT" ? "表面" : "裏面"}・${flash.repeatIndex}/${flash.repeatCount}回${flash.speaking ? "・読み上げ中" : ""}`
+    : "";
   document.getElementById("flash-pause").textContent = flash.paused ? "再開" : "一時停止";
-  const total = flash.secDeci * 100;
+  const repeatButton = document.getElementById("flash-repeat-speech");
+  if (repeatButton) {
+    repeatButton.hidden = !speechActive;
+    repeatButton.textContent = flash.phase === "FRONT" ? "表面をもう一度読む" : "裏面をもう一度読む";
+  }
+  const total = speechActive
+    ? Math.max(1, (flash.phase === "FRONT" ? flash.frontWaitDeci : flash.backWaitDeci) * 100)
+    : Math.max(1, flash.secDeci * 100);
   const percent = Math.max(0, Math.min(100, (flash.remainingMs / total) * 100));
   document.getElementById("flash-progress").innerHTML = `<div class="progress"><div style="width:${percent}%"></div></div>`;
 }
-
 function renderSettings() {
   const settings = loadSettings();
   app.innerHTML = shell("設定", `
@@ -2619,8 +2795,25 @@ function renderSettings() {
           <label><span>既定の制限時間（秒）</span><input class="field" id="s-time" type="number" min="0" max="600" value="${settings.timeLimitSec}"></label>
           <label><span>最大挑戦回数</span><input class="field" id="s-attempts" type="number" min="1" max="99" value="${settings.maxAttempts}"></label>
           <label><span>正誤表示時間（秒）</span><input class="field" id="s-feedback" type="number" min="0.1" max="60" step="0.1" value="${settings.feedbackDeci / 10}"></label>
-          <label><span>めくり表示時間（秒）</span><input class="field" id="s-flash" type="number" min="0.3" max="60" step="0.1" value="${settings.flashcardDeci / 10}"></label>
+          <label><span>めくり表示時間（読み上げOFF時・秒）</span><input class="field" id="s-flash" type="number" min="0.3" max="60" step="0.1" value="${settings.flashcardDeci / 10}"></label>
           <label><span>ゲーム画面の文字サイズ（16〜96px）</span><input class="field" id="s-font-size" type="number" min="16" max="96" value="${settings.gameFontSize}"></label>
+        </div>
+        <label class="row"><input id="s-flash-speech-enabled" type="checkbox" ${settings.flashSpeechEnabled ? "checked" : ""}><span>めくりモードで自動読み上げ</span></label>
+        <div class="card stack" id="flash-speech-settings" ${settings.flashSpeechEnabled ? "" : "hidden"}>
+          <strong>めくり読み上げ</strong>
+          <label><span>読み上げる面</span><select class="field" id="s-flash-speech-target">
+            <option value="BOTH" ${settings.flashSpeechTarget === "BOTH" ? "selected" : ""}>両方</option>
+            <option value="FRONT" ${settings.flashSpeechTarget === "FRONT" ? "selected" : ""}>表面だけ</option>
+            <option value="BACK" ${settings.flashSpeechTarget === "BACK" ? "selected" : ""}>裏面だけ</option>
+          </select></label>
+          <div class="grid-2">
+            <label><span>読み上げ速度（0.5〜2.0倍）</span><input class="field" id="s-flash-speech-rate" type="number" min="0.5" max="2" step="0.05" value="${settings.flashSpeechRate}"></label>
+            <label><span>同じカードの繰り返し</span><input class="field" id="s-flash-repeat" type="number" min="1" max="9" value="${settings.flashRepeatCount}"></label>
+            <label><span>表面読み上げ後の待ち時間（秒）</span><input class="field" id="s-flash-front-wait" type="number" min="0" max="60" step="0.1" value="${settings.flashFrontWaitDeci / 10}"></label>
+            <label><span>裏面読み上げ後の待ち時間（秒）</span><input class="field" id="s-flash-back-wait" type="number" min="0" max="60" step="0.1" value="${settings.flashBackWaitDeci / 10}"></label>
+          </div>
+          <label class="row"><input id="s-flash-read-parentheses" type="checkbox" ${settings.flashSpeechReadParentheses ? "checked" : ""}><span>括弧内の注釈も読む</span></label>
+          <div class="subtle small">↑・↓・HTMLタグは読み上げ時だけ除外します。</div>
         </div>
         <label class="row"><input id="s-auto" type="checkbox" ${settings.autoAdvance ? "checked" : ""}><span>正誤表示後に自動で次へ</span></label>
         <label class="row"><input id="s-new-only" type="checkbox" ${settings.newOnly ? "checked" : ""}><span>新規カードだけ出題</span></label>
@@ -2648,6 +2841,10 @@ function renderSettings() {
     </div>
   `);
 
+  document.getElementById("s-flash-speech-enabled").addEventListener("change", event => {
+    document.getElementById("flash-speech-settings").hidden = !event.target.checked;
+  });
+
   document.getElementById("save-settings").addEventListener("click", () => {
     const next = {
       ...settings,
@@ -2656,6 +2853,13 @@ function renderSettings() {
       maxAttempts: clampInt(document.getElementById("s-attempts").value, 1, 99),
       feedbackDeci: clampInt(Math.round(Number(document.getElementById("s-feedback").value) * 10), 1, 600),
       flashcardDeci: clampInt(Math.round(Number(document.getElementById("s-flash").value) * 10), 3, 600),
+      flashSpeechEnabled: document.getElementById("s-flash-speech-enabled").checked,
+      flashSpeechTarget: document.getElementById("s-flash-speech-target").value,
+      flashSpeechRate: Math.min(2, Math.max(0.5, Number(document.getElementById("s-flash-speech-rate").value) || 1)),
+      flashFrontWaitDeci: clampInt(Math.round(Number(document.getElementById("s-flash-front-wait").value) * 10), 0, 600),
+      flashBackWaitDeci: clampInt(Math.round(Number(document.getElementById("s-flash-back-wait").value) * 10), 0, 600),
+      flashRepeatCount: clampInt(document.getElementById("s-flash-repeat").value, 1, 9),
+      flashSpeechReadParentheses: document.getElementById("s-flash-read-parentheses").checked,
       gameFontSize: clampInt(document.getElementById("s-font-size").value, 16, 96),
       autoAdvance: document.getElementById("s-auto").checked,
       newOnly: document.getElementById("s-new-only").checked,
