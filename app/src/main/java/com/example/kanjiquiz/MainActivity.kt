@@ -67,9 +67,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -108,7 +106,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.17"
+private const val APP_VERSION = "1.19"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -132,6 +130,7 @@ data class Settings(
     val flashBackWaitDeci: Int = 40,
     val flashRepeatCount: Int = 1,
     val flashSpeechReadParentheses: Boolean = false,
+    val flashShowBothInitially: Boolean = false,
     val reverse: Boolean = false,
     val gameMode: GameMode = GameMode.NORMAL,
     val weakPriority: Boolean = true,
@@ -218,6 +217,7 @@ class Store(context: Context) {
         flashBackWaitDeci = sp.getInt("flashBackWaitDeci", 40).coerceIn(0, 600),
         flashRepeatCount = sp.getInt("flashRepeatCount", 1).coerceIn(1, 9),
         flashSpeechReadParentheses = sp.getBoolean("flashSpeechReadParentheses", false),
+        flashShowBothInitially = sp.getBoolean("flashShowBothInitially", false),
         reverse = sp.getBoolean("reverse", false),
         gameMode = runCatching { GameMode.valueOf(sp.getString("gameMode", "NORMAL")!!) }
             .getOrDefault(GameMode.NORMAL)
@@ -243,6 +243,7 @@ class Store(context: Context) {
             .putInt("flashBackWaitDeci", s.flashBackWaitDeci.coerceIn(0, 600))
             .putInt("flashRepeatCount", s.flashRepeatCount.coerceIn(1, 9))
             .putBoolean("flashSpeechReadParentheses", s.flashSpeechReadParentheses)
+            .putBoolean("flashShowBothInitially", s.flashShowBothInitially)
             .putBoolean("reverse", s.reverse)
             .putString("gameMode", s.gameMode.name)
             .putBoolean("weakPriority", s.weakPriority)
@@ -1329,6 +1330,7 @@ private fun App() {
                 backWaitDeci = settings.flashBackWaitDeci,
                 repeatCount = settings.flashRepeatCount,
                 readParentheses = settings.flashSpeechReadParentheses,
+                showBothInitially = settings.flashShowBothInitially,
                 initialFontSizeSp = settings.gameFontSizeSp,
                 onGameFontSizeChanged = { size ->
                     settings = settings.copy(gameFontSizeSp = size)
@@ -1825,6 +1827,24 @@ private fun SettingsScreen(
                 listOf("1回" to 1, "2回" to 2, "3回" to 3),
                 settings.flashRepeatCount,
             ) { onChange(settings.copy(flashRepeatCount = it)) }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("最初から問題と答えを両方表示", fontWeight = FontWeight.Bold)
+                    Text(
+                        "オンでは、読み上げ中も裏面を隠さず最初から表示します。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = settings.flashShowBothInitially,
+                    onCheckedChange = { onChange(settings.copy(flashShowBothInitially = it)) },
+                )
+            }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -2541,7 +2561,6 @@ private fun QuizScreen(
     var ended by remember { mutableStateOf(false) }
     var showConfirm by remember { mutableStateOf(false) }
     val logs = remember { mutableStateListOf<AnswerLog>() }
-    val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     val startedAt = remember { System.currentTimeMillis() }
 
@@ -2759,10 +2778,8 @@ private fun QuizScreen(
         val normalized = normalizeKana(recorded)
         if (normalized.isEmpty()) return
         judge(normalized in item.accepted, recorded)
-        // 再挑戦なら入力を続けやすいようIMEを維持し、結果表示へ進む場合だけ閉じる。
-        if (phase != Phase.ASKING) {
-            focusManager.clearFocus(force = true)
-        }
+        // 次の入力はユーザーが入力欄をタップして開始する。再挑戦時もIMEを自動表示しない。
+        focusManager.clearFocus(force = true)
     }
 
     fun passQuestion() {
@@ -2790,8 +2807,6 @@ private fun QuizScreen(
 
     LaunchedEffect(questionSerial, phase) {
         if (phase == Phase.ASKING) {
-            delay(100)
-            if (!reverse) runCatching { focusRequester.requestFocus() }
             if (perQuestionTimer) {
                 while (remaining > 0f && !ended && phase == Phase.ASKING) {
                     delay(100)
@@ -3110,9 +3125,7 @@ private fun QuizScreen(
                     OutlinedTextField(
                         value = input,
                         onValueChange = { input = it },
-                        modifier = Modifier
-                            .weight(1f)
-                            .focusRequester(focusRequester),
+                        modifier = Modifier.weight(1f),
                         placeholder = { Text("よみを ひらがなで入力") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
@@ -3179,6 +3192,7 @@ private fun FlashcardScreen(
     backWaitDeci: Int,
     repeatCount: Int,
     readParentheses: Boolean,
+    showBothInitially: Boolean,
     initialFontSizeSp: Int,
     onGameFontSizeChanged: (Int) -> Unit,
     onDone: () -> Unit,
@@ -3467,7 +3481,7 @@ private fun FlashcardScreen(
                         textAlign = TextAlign.Center,
                     )
                 }
-                if (!effectiveSpeech || showingBack) {
+                if (!effectiveSpeech || showBothInitially || showingBack) {
                     Spacer(Modifier.height(16.dp))
                     HorizontalDivider(modifier = Modifier.fillMaxWidth().padding(horizontal = 40.dp))
                     Spacer(Modifier.height(16.dp))

@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.19";
+const APP_VERSION = "0.1.21";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -31,6 +31,7 @@ const DEFAULT_SETTINGS = {
   flashBackWaitDeci: 40,
   flashRepeatCount: 1,
   flashSpeechReadParentheses: false,
+  flashShowBothInitially: false,
   reverse: false,
   gameMode: "NORMAL",
   weakPriority: true,
@@ -136,6 +137,7 @@ function loadSettings() {
     flashBackWaitDeci: clampInt(saved.flashBackWaitDeci ?? DEFAULT_SETTINGS.flashBackWaitDeci, 0, 600),
     flashRepeatCount: clampInt(saved.flashRepeatCount ?? DEFAULT_SETTINGS.flashRepeatCount, 1, 9),
     flashSpeechReadParentheses: Boolean(saved.flashSpeechReadParentheses),
+    flashShowBothInitially: Boolean(saved.flashShowBothInitially),
     gameFontSize: clampInt(saved.gameFontSize ?? DEFAULT_SETTINGS.gameFontSize, 16, 96),
     gameMode: saved.gameMode === "DAILY" ? "NORMAL" : (saved.gameMode || DEFAULT_SETTINGS.gameMode),
     newOnly: Boolean(saved.newOnly)
@@ -2189,7 +2191,6 @@ function renderQuizQuestion(session) {
         submit();
       }
     });
-    setTimeout(() => input.focus({ preventScroll: true }), 50);
   }
   bindImmediateQuizAction(document.getElementById("pass-question"), () => session.judge(false, "", true));
   installSelectionPause(session);
@@ -2543,6 +2544,7 @@ function startFlash(items, settings) {
     backWaitDeci: clampInt(settings.flashBackWaitDeci, 0, 600),
     repeatCount: clampInt(settings.flashRepeatCount, 1, 9),
     readParentheses: Boolean(settings.flashSpeechReadParentheses),
+    showBothInitially: Boolean(settings.flashShowBothInitially),
     phase: "FRONT",
     repeatIndex: 1,
     speaking: false,
@@ -2646,7 +2648,7 @@ function renderFlashCardContent() {
   const flash = state.flash;
   if (!flash) return;
   const item = flash.items[flash.index];
-  const revealBack = !flash.speechEnabled || flash.phase === "BACK";
+  const revealBack = !flash.speechEnabled || flash.showBothInitially || flash.phase === "BACK";
   document.getElementById("flash-content").innerHTML = `
     <div class="stack">
       <div class="selectable flash-question">${textHtml(item.question)}</div>
@@ -2812,6 +2814,8 @@ function renderSettings() {
             <label><span>表面読み上げ後の待ち時間（秒）</span><input class="field" id="s-flash-front-wait" type="number" min="0" max="60" step="0.1" value="${settings.flashFrontWaitDeci / 10}"></label>
             <label><span>裏面読み上げ後の待ち時間（秒）</span><input class="field" id="s-flash-back-wait" type="number" min="0" max="60" step="0.1" value="${settings.flashBackWaitDeci / 10}"></label>
           </div>
+          <label class="row"><input id="s-flash-show-both" type="checkbox" ${settings.flashShowBothInitially ? "checked" : ""}><span>最初から問題と答えを両方表示</span></label>
+          <div class="subtle small">オンでは、読み上げ中も答えを隠さず最初から表示します。</div>
           <label class="row"><input id="s-flash-read-parentheses" type="checkbox" ${settings.flashSpeechReadParentheses ? "checked" : ""}><span>括弧内の注釈も読む</span></label>
           <div class="subtle small">↑・↓・HTMLタグは読み上げ時だけ除外します。</div>
         </div>
@@ -2860,6 +2864,7 @@ function renderSettings() {
       flashBackWaitDeci: clampInt(Math.round(Number(document.getElementById("s-flash-back-wait").value) * 10), 0, 600),
       flashRepeatCount: clampInt(document.getElementById("s-flash-repeat").value, 1, 9),
       flashSpeechReadParentheses: document.getElementById("s-flash-read-parentheses").checked,
+      flashShowBothInitially: document.getElementById("s-flash-show-both").checked,
       gameFontSize: clampInt(document.getElementById("s-font-size").value, 16, 96),
       autoAdvance: document.getElementById("s-auto").checked,
       newOnly: document.getElementById("s-new-only").checked,

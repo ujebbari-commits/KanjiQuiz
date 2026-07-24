@@ -327,3 +327,8 @@ git add -A && git commit -m "update" && git push
 - 読み上げONでは裏面を最初は隠し、表面読み上げ→待機→裏面表示・読み上げ→待機→次カード。OFFでは従来どおり表裏を同時表示。
 - Android Manifestの `<queries>` に `android.intent.action.TTS_SERVICE` を追加。
 - 読み上げ用テキストではHTMLタグ・`[sound:]`・ピッチアクセント矢印を除去する。元のカード表示内容は変更しない。
+
+- v1.18 / Web v0.1.20: `flashShowBothInitially` を追加。読み上げON時、trueなら表面フェーズから裏面も表示する。音声の順序（表面→裏面）と待機・自動送りは変更しない。読み上げOFFでは従来どおり常に表裏を同時表示する。
+
+
+- v1.19 / Web v0.1.21: クイズ回答欄の自動フォーカスを廃止。開始・次問・再挑戦でIMEを自動表示せず、回答後はフォーカスを解除する。
