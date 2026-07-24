@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.21";
+const APP_VERSION = "0.1.23";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -212,6 +212,73 @@ function loadCardStats() {
 
 function saveCardStats(stats) {
   writeJson("kq.cardStats", stats);
+}
+
+function loadCardEdits() {
+  const value = readJson("kq.cardEdits", {});
+  return value && typeof value === "object" ? value : {};
+}
+
+function cardEditEntry(deckId, noteId) {
+  const root = loadCardEdits();
+  const deckEdits = root[String(deckId)];
+  const entry = deckEdits && typeof deckEdits === "object" ? deckEdits[String(noteId)] : null;
+  return entry && typeof entry === "object" ? entry : null;
+}
+
+function effectiveNoteFields(deck, note) {
+  const base = Array.from({ length: deck.fields.length }, (_, index) => String(note.fields[index] ?? ""));
+  const entry = cardEditEntry(deck.id, note.id);
+  if (!entry) return base;
+  const byName = entry.byName && typeof entry.byName === "object" ? entry.byName : {};
+  const byIndex = entry.byIndex && typeof entry.byIndex === "object" ? entry.byIndex : {};
+  return base.map((value, index) => {
+    const fieldName = String(deck.fields[index] ?? "");
+    if (Object.prototype.hasOwnProperty.call(byName, fieldName)) return String(byName[fieldName] ?? "");
+    if (Object.prototype.hasOwnProperty.call(byIndex, String(index))) return String(byIndex[String(index)] ?? "");
+    return value;
+  });
+}
+
+function saveCardEdit(deck, note, editedFields) {
+  const root = loadCardEdits();
+  const deckId = String(deck.id);
+  const noteId = String(note.id);
+  const byName = {};
+  const byIndex = {};
+  const names = deck.fields.map(String);
+  const duplicateNames = new Set(names.filter((name, index) => names.indexOf(name) !== index));
+  for (let index = 0; index < deck.fields.length; index += 1) {
+    const base = String(note.fields[index] ?? "");
+    const edited = String(editedFields[index] ?? "");
+    if (edited === base) continue;
+    const fieldName = names[index];
+    if (fieldName && !duplicateNames.has(fieldName)) byName[fieldName] = edited;
+    byIndex[String(index)] = edited;
+  }
+  const deckEdits = root[deckId] && typeof root[deckId] === "object" ? { ...root[deckId] } : {};
+  if (Object.keys(byName).length || Object.keys(byIndex).length) {
+    deckEdits[noteId] = { byName, byIndex, updatedAt: Date.now() };
+  } else {
+    delete deckEdits[noteId];
+  }
+  if (Object.keys(deckEdits).length) root[deckId] = deckEdits; else delete root[deckId];
+  writeJson("kq.cardEdits", root);
+}
+
+function clearCardEdit(deckId, noteId) {
+  const root = loadCardEdits();
+  const deckKey = String(deckId);
+  const deckEdits = root[deckKey] && typeof root[deckKey] === "object" ? { ...root[deckKey] } : {};
+  delete deckEdits[String(noteId)];
+  if (Object.keys(deckEdits).length) root[deckKey] = deckEdits; else delete root[deckKey];
+  writeJson("kq.cardEdits", root);
+}
+
+function removeDeckCardEdits(deckId) {
+  const root = loadCardEdits();
+  delete root[String(deckId)];
+  writeJson("kq.cardEdits", root);
 }
 
 function loadSeenCards() {
@@ -1272,7 +1339,7 @@ function renderImport() {
         if (!incoming._importHasStableNoteIds) throw new Error("カードIDがないため安全に更新できません。Android版から書き出したJSONを使用してください。");
         const summary = compareDeckUpdate(existing, incoming);
         if (summary.duplicates.length) throw new Error("同じカードIDが重複しているため更新できません。");
-        const message = `「${existing.name}」を更新します。\n\n進捗維持: ${summary.matched}枚\n新規追加: ${summary.added}枚\n内容変更: ${summary.changed}枚\nデッキから削除: ${summary.removed}枚\n\n既存の成功回数・苦手度・出題済み状態は維持されます。続行しますか？`;
+        const message = `「${existing.name}」を更新します。\n\n進捗維持: ${summary.matched}枚\n新規追加: ${summary.added}枚\n内容変更: ${summary.changed}枚\nデッキから削除: ${summary.removed}枚\n\n既存の成功回数・苦手度・出題済み状態・KanjiQuiz内のカード編集は維持されます。続行しますか？`;
         if (!confirm(message)) return;
         migrateThreeCorrectProfilesForDeckUpdate(existing, incoming);
         migrateFieldPrefsForDeckUpdate(existing, incoming);
@@ -1297,7 +1364,7 @@ function renderImport() {
 }
 
 function restoreAppData(appData) {
-  const allowed = ["settings", "history", "cardStats", "seenCards", "streak", "dailyCompleted", "threeCorrectProgress", "dailyChallengeSettings"];
+  const allowed = ["settings", "history", "cardStats", "seenCards", "streak", "dailyCompleted", "threeCorrectProgress", "dailyChallengeSettings", "cardEdits"];
   for (const key of allowed) {
     if (appData[key] != null) writeJson(`kq.${key}`, appData[key]);
   }
@@ -1315,7 +1382,7 @@ function renderFields() {
   if (!deck) return navigate("home", { push: false });
   const prefs = state.fieldConfig || loadFieldPrefs(deck);
   const settings = loadSettings();
-  const sample = deck.notes[0]?.fields || [];
+  const sample = deck.notes[0] ? effectiveNoteFields(deck, deck.notes[0]) : [];
   const dailyKey = makeDailyKey(deck, prefs.qFields, prefs.aFields, settings.reverse);
   const dailyDone = settings.gameMode === "DAILY" && isDailyCompleted(dailyKey);
 
@@ -1513,10 +1580,17 @@ function renderFields() {
   updateThreeCorrectPanel();
 
   document.getElementById("export-deck").addEventListener("click", () => {
+    const exportedDeck = {
+      ...deck,
+      notes: deck.notes.map(note => ({
+        id: String(note.id),
+        fields: effectiveNoteFields(deck, note)
+      }))
+    };
     downloadJson(`${safeFilename(deck.name)}.kanjiquiz.json`, {
       format: "KanjiQuizWebDeck",
       version: 1,
-      deck
+      deck: exportedDeck
     });
   });
 
@@ -1529,6 +1603,7 @@ function renderFields() {
     if (!confirm(`「${deck.name}」をWeb版から削除しますか？\nAnkiDroid側のデータは変更されません。`)) return;
     await dbDeleteDeck(deck.id);
     localStorage.removeItem(fieldPrefKey(deck.id));
+    removeDeckCardEdits(deck.id);
     state.currentDeck = null;
     state.fieldConfig = null;
     await refreshDecks();
@@ -1560,14 +1635,20 @@ function collectFieldSettings(base) {
 }
 
 function makeUsableItems(deck, prefs, reverse) {
-  return deck.notes.map(note => ({
-    noteId: note.id,
-    sourceDeckId: String(deck.id),
-    sourceDeckName: deck.name,
-    question: joinFields(note.fields, prefs.qFields),
-    displayAnswer: joinFields(note.fields, prefs.aFields),
-    accepted: acceptedFrom(note.fields, prefs.aFields)
-  })).filter(item => reverse
+  return deck.notes.map(note => {
+    const fields = effectiveNoteFields(deck, note);
+    return {
+      noteId: note.id,
+      sourceDeckId: String(deck.id),
+      sourceDeckName: deck.name,
+      fields,
+      qFields: [...prefs.qFields],
+      aFields: [...prefs.aFields],
+      question: joinFields(fields, prefs.qFields),
+      displayAnswer: joinFields(fields, prefs.aFields),
+      accepted: acceptedFrom(fields, prefs.aFields)
+    };
+  }).filter(item => reverse
     ? item.question.trim() && item.displayAnswer.trim()
     : item.question.trim() && item.accepted.length);
 }
@@ -1743,11 +1824,123 @@ function uniqueBy(values, keyFn) {
 }
 
 function buildFlashItems(deck, prefs, settings) {
-  const items = shuffle(deck.notes).map(note => ({
-    question: joinFields(note.fields, prefs.qFields),
-    answer: joinFields(note.fields, prefs.aFields)
-  })).filter(item => item.question || item.answer);
+  const items = shuffle(deck.notes).map(note => {
+    const fields = effectiveNoteFields(deck, note);
+    return {
+      noteId: note.id,
+      sourceDeckId: String(deck.id),
+      sourceDeckName: deck.name,
+      fields,
+      qFields: [...prefs.qFields],
+      aFields: [...prefs.aFields],
+      question: joinFields(fields, prefs.qFields),
+      answer: joinFields(fields, prefs.aFields),
+      displayAnswer: joinFields(fields, prefs.aFields),
+      accepted: acceptedFrom(fields, prefs.aFields)
+    };
+  }).filter(item => item.question || item.answer);
   return settings.count < 0 ? items : items.slice(0, settings.count);
+}
+
+
+function sourceDeckAndNote(item) {
+  const deck = state.decks.find(candidate => String(candidate.id) === String(item?.sourceDeckId));
+  const note = deck?.notes.find(candidate => String(candidate.id) === String(item?.noteId));
+  return { deck, note };
+}
+
+function refreshRuntimeItem(item, deck, note) {
+  if (!item || String(item.sourceDeckId) !== String(deck.id) || String(item.noteId) !== String(note.id)) return;
+  const fields = effectiveNoteFields(deck, note);
+  item.fields = fields;
+  const qFields = Array.isArray(item.qFields) ? item.qFields : [];
+  const aFields = Array.isArray(item.aFields) ? item.aFields : [];
+  item.question = joinFields(fields, qFields);
+  item.displayAnswer = joinFields(fields, aFields);
+  item.answer = item.displayAnswer;
+  item.accepted = acceptedFrom(fields, aFields);
+}
+
+function refreshRuntimeCard(deck, note) {
+  const candidates = new Set();
+  const addAll = values => {
+    if (!Array.isArray(values)) return;
+    values.forEach(value => value && candidates.add(value));
+  };
+  const quiz = state.quiz;
+  if (quiz) {
+    addAll(quiz.baseItems);
+    addAll(quiz.cycleItems);
+    addAll(quiz.masteryQueue);
+    addAll(quiz.threeCorrectQueue);
+    addAll(quiz.config?.items);
+    addAll(quiz.config?.choicePool);
+    quiz.logs?.forEach(log => log?.item && candidates.add(log.item));
+  }
+  addAll(state.flash?.items);
+  candidates.forEach(item => refreshRuntimeItem(item, deck, note));
+}
+
+function closeCardEditor() {
+  document.getElementById("card-editor-overlay")?.remove();
+}
+
+function openCardEditor(item, { onSaved = () => {}, onClosed = () => {} } = {}) {
+  closeCardEditor();
+  const { deck, note } = sourceDeckAndNote(item);
+  if (!deck || !note) {
+    alert("このカードの元デッキを確認できないため編集できません。");
+    onClosed();
+    return;
+  }
+  const effective = effectiveNoteFields(deck, note);
+  const hasEdit = Boolean(cardEditEntry(deck.id, note.id));
+  const overlay = document.createElement("div");
+  overlay.id = "card-editor-overlay";
+  overlay.className = "modal-backdrop";
+  overlay.innerHTML = `
+    <div class="modal card-editor-modal" role="dialog" aria-modal="true" aria-labelledby="card-editor-title">
+      <h3 id="card-editor-title">カードを編集</h3>
+      <p class="small subtle">編集内容はKanjiQuiz内だけに保存されます。AnkiDroidのカードは変更されません。</p>
+      <div class="card-editor-fields">
+        ${deck.fields.map((fieldName, index) => `
+          <label class="card-editor-field">
+            <span>${escapeHtml(fieldName || `フィールド${index + 1}`)}</span>
+            <textarea class="field card-editor-textarea" data-edit-field="${index}" rows="3">${escapeHtml(effective[index] ?? "")}</textarea>
+          </label>`).join("")}
+      </div>
+      <div id="card-editor-message"></div>
+      <div class="grid-2">
+        <button class="btn btn-ghost" id="cancel-card-edit" type="button">キャンセル</button>
+        <button class="btn btn-primary" id="save-card-edit" type="button">保存</button>
+      </div>
+      <button class="btn btn-danger btn-wide" id="reset-card-edit" type="button" ${hasEdit ? "" : "disabled"}>KanjiQuiz内の編集を取り消す</button>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const finishClose = () => {
+    closeCardEditor();
+    onClosed();
+  };
+  bindImmediateQuizAction(document.getElementById("cancel-card-edit"), finishClose);
+  bindImmediateQuizAction(document.getElementById("save-card-edit"), () => {
+    const values = Array.from({ length: deck.fields.length }, (_, index) =>
+      document.querySelector(`[data-edit-field="${index}"]`)?.value ?? ""
+    );
+    saveCardEdit(deck, note, values);
+    refreshRuntimeCard(deck, note);
+    closeCardEditor();
+    onSaved();
+    onClosed();
+  });
+  bindImmediateQuizAction(document.getElementById("reset-card-edit"), () => {
+    if (!confirm("このカードに保存したKanjiQuiz内の編集を取り消し、AnkiDroidから読み込んだ内容へ戻しますか？")) return;
+    clearCardEdit(deck.id, note.id);
+    refreshRuntimeCard(deck, note);
+    closeCardEditor();
+    onSaved();
+    onClosed();
+  });
 }
 
 class QuizSession {
@@ -2149,7 +2342,9 @@ function renderQuizQuestion(session) {
   updateQuizHeaderUi(session);
   const main = document.getElementById("quiz-main");
   const controls = document.getElementById("quiz-controls");
-  main.innerHTML = `<div class="selectable prompt-text" id="selectable-prompt">${textHtml(session.promptText)}</div>`;
+  main.innerHTML = `
+    <div class="selectable prompt-text" id="selectable-prompt">${textHtml(session.promptText)}</div>
+    <button class="btn btn-ghost card-edit-button" id="edit-current-card" type="button">編集</button>`;
   if (session.config.reverse) {
     const choices = session.choices;
     controls.innerHTML = `
@@ -2193,8 +2388,32 @@ function renderQuizQuestion(session) {
     });
   }
   bindImmediateQuizAction(document.getElementById("pass-question"), () => session.judge(false, "", true));
+  bindCurrentCardEditor(session);
   installSelectionPause(session);
   updateQuizTimerUi(session);
+}
+
+function bindCurrentCardEditor(session) {
+  const button = document.getElementById("edit-current-card");
+  if (!button) return;
+  button.addEventListener("click", () => {
+    const wasPaused = session.paused;
+    session.paused = true;
+    const rerender = () => {
+      if (!state.quiz || state.quiz !== session || session.ended) return;
+      if (session.phase === "FEEDBACK") renderQuizFeedback(session);
+      else renderQuizQuestion(session);
+    };
+    openCardEditor(session.item, {
+      onSaved: rerender,
+      onClosed: () => {
+        if (!state.quiz || state.quiz !== session || session.ended) return;
+        session.paused = wasPaused;
+        session.lastTick = performance.now();
+        updateQuizTimerUi(session);
+      }
+    });
+  });
 }
 
 function installSelectionPause(session) {
@@ -2230,8 +2449,10 @@ function renderQuizFeedback(session) {
   const finishAfter = shouldFinishAfterFeedback(session);
   const imageSearchUrl = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(session.promptText.trim())}`;
   document.getElementById("quiz-controls").innerHTML = `
+    <button class="btn btn-ghost btn-wide" id="edit-current-card" type="button">カードを編集</button>
     <a class="btn btn-ghost btn-wide" id="google-image-search" href="${escapeHtml(imageSearchUrl)}" target="_blank" rel="noopener noreferrer">Google画像で検索</a>
     <button class="btn btn-primary btn-wide" id="next-question" type="button">${finishAfter ? "結果を見る" : "次へ"}</button>`;
+  bindCurrentCardEditor(session);
   document.getElementById("next-question").addEventListener("click", () => session.goNext());
   session.selectionPaused = false;
   updateQuizTimerUi(session);
@@ -2589,6 +2810,8 @@ function renderFlash() {
         ? `<div class="error small">このブラウザーでは読み上げを利用できないため、通常の自動めくりで再生します。</div>`
         : ""}
       <section class="flash-content" id="flash-content"></section>
+      <button class="btn btn-ghost btn-wide" id="flash-edit-card" type="button">カードを編集</button>
+      <a class="btn btn-ghost btn-wide" id="flash-google-image-search" href="#" target="_blank" rel="noopener noreferrer">Google画像で検索</a>
       <button class="btn btn-ghost btn-wide" id="flash-repeat-speech" type="button" hidden>現在の面をもう一度読む</button>
       <div class="grid-3">
         <button class="btn btn-ghost" id="flash-prev" type="button">前へ</button>
@@ -2629,6 +2852,24 @@ function renderFlash() {
     if (!flash.speechEnabled || !speechSupported) return;
     beginFlashPhase({ preserveWait: false });
   });
+  document.getElementById("flash-edit-card").addEventListener("click", () => {
+    const item = flash.items[flash.index];
+    const wasPaused = flash.paused;
+    flash.paused = true;
+    cancelFlashSpeech();
+    flash.speaking = false;
+    flash.speechToken += 1;
+    openCardEditor(item, {
+      onSaved: () => renderFlashCardContent(),
+      onClosed: () => {
+        if (!state.flash || state.flash !== flash) return;
+        flash.paused = wasPaused;
+        flash.lastTick = performance.now();
+        if (!flash.paused) beginFlashPhase({ preserveWait: true });
+        updateFlashUi();
+      }
+    });
+  });
   resetFlashCard();
   flash.timerId = setInterval(tickFlash, 100);
 }
@@ -2654,6 +2895,14 @@ function renderFlashCardContent() {
       <div class="selectable flash-question">${textHtml(item.question)}</div>
       ${revealBack ? `<div class="selectable flash-answer">${textHtml(item.answer)}</div>` : ""}
     </div>`;
+  const imageSearch = document.getElementById("flash-google-image-search");
+  if (imageSearch) {
+    const query = cleanText(item.question);
+    imageSearch.href = query
+      ? `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`
+      : "#";
+    imageSearch.setAttribute("aria-disabled", query ? "false" : "true");
+  }
   updateFlashUi();
 }
 
@@ -2897,7 +3146,8 @@ function renderSettings() {
         streak: readJson("kq.streak", { date: "", count: 0 }),
         dailyCompleted: readJson("kq.dailyCompleted", {}),
         dailyChallengeSettings: loadDailyChallengeSettings(),
-        threeCorrectProgress: loadThreeCorrectProgress()
+        threeCorrectProgress: loadThreeCorrectProgress(),
+        cardEdits: loadCardEdits()
       }
     });
   });

@@ -332,3 +332,37 @@ body.quiz-keyboard-active {
   from { box-shadow: 0 0 0 1px color-mix(in srgb, var(--warning) 25%, transparent), 0 0 8px color-mix(in srgb, var(--warning) 18%, transparent); }
   to { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 45%, transparent), 0 0 22px color-mix(in srgb, var(--warning) 34%, transparent); }
 }
+
+.card-edit-button {
+  justify-self: center;
+  margin-top: 10px;
+}
+.card-editor-modal {
+  max-height: calc(100dvh - 36px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(100%, 620px);
+}
+.card-editor-fields {
+  display: grid;
+  gap: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+.card-editor-field {
+  display: grid;
+  gap: 5px;
+}
+.card-editor-field > span {
+  font-size: .85rem;
+  color: var(--muted);
+  font-weight: 700;
+}
+.card-editor-textarea {
+  width: 100%;
+  min-height: 82px;
+  resize: vertical;
+  font: inherit;
+}

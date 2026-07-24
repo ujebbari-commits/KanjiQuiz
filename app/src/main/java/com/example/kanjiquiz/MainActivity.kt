@@ -106,7 +106,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.19"
+private const val APP_VERSION = "1.21"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -379,6 +379,47 @@ class Store(context: Context) {
         sp.edit().putString("cardStats", o.toString()).apply()
     }
 
+    fun applyCardEdits(deckName: String, noteId: Long, originalFields: List<String>): List<String> {
+        val root = runCatching { JSONObject(sp.getString("cardEdits", "{}") ?: "{}") }
+            .getOrDefault(JSONObject())
+        val edit = root.optJSONObject(deckName)?.optJSONObject(noteId.toString())
+            ?: return originalFields.toList()
+        return originalFields.mapIndexed { index, value ->
+            if (edit.has(index.toString())) edit.optString(index.toString(), value) else value
+        }
+    }
+
+    fun saveCardEdit(
+        deckName: String,
+        noteId: Long,
+        originalFields: List<String>,
+        editedFields: List<String>,
+    ) {
+        val root = runCatching { JSONObject(sp.getString("cardEdits", "{}") ?: "{}") }
+            .getOrDefault(JSONObject())
+        val deckEdits = root.optJSONObject(deckName) ?: JSONObject()
+        val edit = JSONObject()
+        val fieldCount = maxOf(originalFields.size, editedFields.size)
+        repeat(fieldCount) { index ->
+            val original = originalFields.getOrNull(index) ?: ""
+            val edited = editedFields.getOrNull(index) ?: ""
+            if (edited != original) edit.put(index.toString(), edited)
+        }
+        if (edit.length() == 0) deckEdits.remove(noteId.toString())
+        else deckEdits.put(noteId.toString(), edit)
+        if (deckEdits.length() == 0) root.remove(deckName) else root.put(deckName, deckEdits)
+        sp.edit().putString("cardEdits", root.toString()).apply()
+    }
+
+    fun clearCardEdit(deckName: String, noteId: Long) {
+        val root = runCatching { JSONObject(sp.getString("cardEdits", "{}") ?: "{}") }
+            .getOrDefault(JSONObject())
+        val deckEdits = root.optJSONObject(deckName) ?: return
+        deckEdits.remove(noteId.toString())
+        if (deckEdits.length() == 0) root.remove(deckName) else root.put(deckName, deckEdits)
+        sp.edit().putString("cardEdits", root.toString()).apply()
+    }
+
     fun loadSeenCardIds(deckName: String): Set<Long> {
         val raw = sp.getString("seenCards", null) ?: return emptySet()
         return runCatching {
@@ -505,9 +546,14 @@ data class DeckInfo(val id: Long, val name: String)
 
 data class QuizItem(
     val noteId: Long,
-    val question: String,
-    val displayAnswer: String,
-    val accepted: List<String>,
+    val sourceDeckName: String,
+    val originalFields: List<String>,
+    var fields: List<String>,
+    val questionFieldIndices: List<Int>,
+    val answerFieldIndices: List<Int>,
+    var question: String,
+    var displayAnswer: String,
+    var accepted: List<String>,
 )
 
 data class AnswerLog(val item: QuizItem, val correct: Boolean, val input: String)
@@ -575,6 +621,13 @@ private fun joinFields(flds: List<String>, indices: List<Int>): String =
 
 private fun acceptedFrom(flds: List<String>, indices: List<Int>): List<String> =
     indices.flatMap { parseAnswers(flds.getOrNull(it) ?: "") }.distinct()
+
+private fun applyFieldsToQuizItem(item: QuizItem, updatedFields: List<String>) {
+    item.fields = updatedFields.toList()
+    item.question = joinFields(item.fields, item.questionFieldIndices)
+    item.displayAnswer = joinFields(item.fields, item.answerFieldIndices)
+    item.accepted = acceptedFrom(item.fields, item.answerFieldIndices)
+}
 
 private fun safeFileName(name: String): String =
     name.replace(Regex("[\\/:*?\"<>|]"), "_").take(80).ifBlank { "deck" }
@@ -708,7 +761,7 @@ private fun App() {
     var fieldError by remember { mutableStateOf<String?>(null) }
 
     var config by remember { mutableStateOf<RoundConfig?>(null) }
-    var flashItems by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    var flashItems by remember { mutableStateOf<List<QuizItem>>(emptyList()) }
     var round by remember { mutableIntStateOf(0) }
     var lastLogs by remember { mutableStateOf<List<AnswerLog>>(emptyList()) }
     var lastScore by remember { mutableIntStateOf(0) }
@@ -732,12 +785,18 @@ private fun App() {
     }
 
     fun buildUsableItems(reverse: Boolean = settings.reverse): List<QuizItem> {
-        return notes.map { (id, flds) ->
+        return notes.map { (id, originalFields) ->
+            val effectiveFields = store.applyCardEdits(deckName, id, originalFields)
             QuizItem(
                 noteId = id,
-                question = joinFields(flds, qFields),
-                displayAnswer = joinFields(flds, aFields),
-                accepted = acceptedFrom(flds, aFields),
+                sourceDeckName = deckName,
+                originalFields = originalFields.toList(),
+                fields = effectiveFields,
+                questionFieldIndices = qFields.toList(),
+                answerFieldIndices = aFields.toList(),
+                question = joinFields(effectiveFields, qFields),
+                displayAnswer = joinFields(effectiveFields, aFields),
+                accepted = acceptedFrom(effectiveFields, aFields),
             )
         }.filter {
             if (reverse) it.question.isNotBlank() && it.displayAnswer.isNotBlank()
@@ -789,12 +848,18 @@ private fun App() {
                 if (deckNotes.isEmpty()) return@forEach
                 val fieldCount = deckNotes.first().second.size
                 val prefs = store.loadDeckFieldPrefs(deck.name, fieldCount)
-                deckNotes.forEach { (id, flds) ->
+                deckNotes.forEach { (id, originalFields) ->
+                    val effectiveFields = store.applyCardEdits(deck.name, id, originalFields)
                     val item = QuizItem(
                         noteId = id,
-                        question = joinFields(flds, prefs.qFields),
-                        displayAnswer = joinFields(flds, prefs.aFields),
-                        accepted = acceptedFrom(flds, prefs.aFields),
+                        sourceDeckName = deck.name,
+                        originalFields = originalFields.toList(),
+                        fields = effectiveFields,
+                        questionFieldIndices = prefs.qFields,
+                        answerFieldIndices = prefs.aFields,
+                        question = joinFields(effectiveFields, prefs.qFields),
+                        displayAnswer = joinFields(effectiveFields, prefs.aFields),
+                        accepted = acceptedFrom(effectiveFields, prefs.aFields),
                     )
                     val usable = if (settings.reverse) {
                         item.question.isNotBlank() && item.displayAnswer.isNotBlank()
@@ -995,11 +1060,21 @@ private fun App() {
         )
     }
 
-    fun buildFlash(): List<Pair<String, String>> {
-        val list = notes.shuffled().mapNotNull { (_, flds) ->
-            val question = joinFields(flds, qFields)
-            val answer = joinFields(flds, aFields)
-            if (question.isBlank() && answer.isBlank()) null else question to answer
+    fun buildFlash(): List<QuizItem> {
+        val list = notes.shuffled().mapNotNull { (id, originalFields) ->
+            val effectiveFields = store.applyCardEdits(deckName, id, originalFields)
+            val item = QuizItem(
+                noteId = id,
+                sourceDeckName = deckName,
+                originalFields = originalFields.toList(),
+                fields = effectiveFields,
+                questionFieldIndices = qFields.toList(),
+                answerFieldIndices = aFields.toList(),
+                question = joinFields(effectiveFields, qFields),
+                displayAnswer = joinFields(effectiveFields, aFields),
+                accepted = acceptedFrom(effectiveFields, aFields),
+            )
+            if (item.question.isBlank() && item.displayAnswer.isBlank()) null else item
         }
         return if (settings.count < 0) list else list.take(settings.count)
     }
@@ -1194,7 +1269,9 @@ private fun App() {
             }
             FieldScreen(
                 deckName = deckName,
-                sample = notes.first().second,
+                sample = notes.first().let { (id, originalFields) ->
+                    store.applyCardEdits(deckName, id, originalFields)
+                },
                 qFields = qFields,
                 aFields = aFields,
                 mode = mode,
@@ -1232,7 +1309,12 @@ private fun App() {
                     }
                 },
                 onExportWeb = {
-                    pendingWebExport = buildWebDeckJson(deckName, notes)
+                    pendingWebExport = buildWebDeckJson(
+                        deckName,
+                        notes.map { (id, originalFields) ->
+                            id to store.applyCardEdits(deckName, id, originalFields)
+                        },
+                    )
                     webExportMessage = null
                     webExportLauncher.launch("${safeFileName(deckName)}.kanjiquiz.json.txt")
                 },
@@ -1314,6 +1396,22 @@ private fun App() {
                         ?: currentConfig.historyDeckName.ifBlank { deckName }
                     store.markCardSeen(sourceDeck, noteId)
                 },
+                onSaveCardEdit = { item, editedFields ->
+                    store.saveCardEdit(
+                        item.sourceDeckName,
+                        item.noteId,
+                        item.originalFields,
+                        editedFields,
+                    )
+                    applyFieldsToQuizItem(
+                        item,
+                        store.applyCardEdits(item.sourceDeckName, item.noteId, item.originalFields),
+                    )
+                },
+                onClearCardEdit = { item ->
+                    store.clearCardEdit(item.sourceDeckName, item.noteId)
+                    applyFieldsToQuizItem(item, item.originalFields)
+                },
                 onFinish = { result -> recordAndFinish(result, currentConfig) },
                 onQuit = { stage = Stage.DECKS },
             )
@@ -1335,6 +1433,22 @@ private fun App() {
                 onGameFontSizeChanged = { size ->
                     settings = settings.copy(gameFontSizeSp = size)
                     store.saveSettings(settings)
+                },
+                onSaveCardEdit = { item, editedFields ->
+                    store.saveCardEdit(
+                        item.sourceDeckName,
+                        item.noteId,
+                        item.originalFields,
+                        editedFields,
+                    )
+                    applyFieldsToQuizItem(
+                        item,
+                        store.applyCardEdits(item.sourceDeckName, item.noteId, item.originalFields),
+                    )
+                },
+                onClearCardEdit = { item ->
+                    store.clearCardEdit(item.sourceDeckName, item.noteId)
+                    applyFieldsToQuizItem(item, item.originalFields)
                 },
                 onDone = { stage = Stage.FIELDS },
             )
@@ -2503,11 +2617,63 @@ private fun CardProgressScreen(
 private enum class Phase { ASKING, FEEDBACK }
 
 @Composable
+private fun CardEditDialog(
+    item: QuizItem,
+    onDismiss: () -> Unit,
+    onSave: (List<String>) -> Unit,
+    onReset: () -> Unit,
+) {
+    val values = remember(item.noteId, item.sourceDeckName) {
+        mutableStateListOf<String>().apply { addAll(item.fields) }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("カードを編集") },
+        text = {
+            Column(
+                modifier = Modifier.height(480.dp).verticalScroll(rememberScrollState()),
+            ) {
+                Text(
+                    "編集内容はKanjiQuiz内だけに保存されます。AnkiDroidのカードは変更されません。",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+                values.forEachIndexed { index, value ->
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = { values[index] = it },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        label = { Text("フィールド${index + 1}") },
+                        minLines = 2,
+                        maxLines = 6,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(values.toList()) }) { Text("保存") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(
+                    onClick = onReset,
+                    enabled = item.fields != item.originalFields,
+                ) { Text("編集を取り消す") }
+                TextButton(onClick = onDismiss) { Text("キャンセル") }
+            }
+        },
+    )
+}
+
+@Composable
 private fun QuizScreen(
     config: RoundConfig,
     onGameFontSizeChanged: (Int) -> Unit,
     onThreeCorrectProgressChanged: (Long, Int) -> Unit,
     onCardShown: (Long) -> Unit,
+    onSaveCardEdit: (QuizItem, List<String>) -> Unit,
+    onClearCardEdit: (QuizItem) -> Unit,
     onFinish: (RoundResult) -> Unit,
     onQuit: () -> Unit,
 ) {
@@ -2560,6 +2726,8 @@ private fun QuizScreen(
     var lives by remember { mutableIntStateOf(3) }
     var ended by remember { mutableStateOf(false) }
     var showConfirm by remember { mutableStateOf(false) }
+    var showCardEditor by remember { mutableStateOf(false) }
+    var editRevision by remember { mutableIntStateOf(0) }
     val logs = remember { mutableStateListOf<AnswerLog>() }
     val focusManager = LocalFocusManager.current
     val startedAt = remember { System.currentTimeMillis() }
@@ -2579,7 +2747,7 @@ private fun QuizScreen(
     }
     val promptText = if (reverse) item.displayAnswer else item.question
     val answerText = if (reverse) item.question else item.displayAnswer
-    val choices = remember(questionSerial, item.noteId) {
+    val choices = remember(questionSerial, item.noteId, editRevision) {
         if (reverse) smartReverseChoices(item, config.choicePool) else emptyList()
     }
 
@@ -2797,7 +2965,7 @@ private fun QuizScreen(
         if (isTimeAttack || isDailyTime) {
             while (globalRemaining > 0f && !ended) {
                 delay(100)
-                if (!showConfirm) {
+                if (!showConfirm && !showCardEditor) {
                     globalRemaining = (globalRemaining - 0.1f).coerceAtLeast(0f)
                 }
             }
@@ -2810,7 +2978,7 @@ private fun QuizScreen(
             if (perQuestionTimer) {
                 while (remaining > 0f && !ended && phase == Phase.ASKING) {
                     delay(100)
-                    if (!showConfirm) {
+                    if (!showConfirm && !showCardEditor) {
                         remaining = (remaining - 0.1f).coerceAtLeast(0f)
                     }
                 }
@@ -2820,7 +2988,7 @@ private fun QuizScreen(
             var waitDeci = config.feedbackDeci
             while (waitDeci > 0 && !ended && phase == Phase.FEEDBACK) {
                 delay(100)
-                if (!showConfirm) waitDeci--
+                if (!showConfirm && !showCardEditor) waitDeci--
             }
             if (!ended && phase == Phase.FEEDBACK) goNext()
         }
@@ -2836,6 +3004,23 @@ private fun QuizScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showConfirm = false }) { Text("続ける") }
+            },
+        )
+    }
+
+    if (showCardEditor) {
+        CardEditDialog(
+            item = item,
+            onDismiss = { showCardEditor = false },
+            onSave = { editedFields ->
+                onSaveCardEdit(item, editedFields)
+                editRevision++
+                showCardEditor = false
+            },
+            onReset = {
+                onClearCardEdit(item)
+                editRevision++
+                showCardEditor = false
             },
         )
     }
@@ -3098,6 +3283,17 @@ private fun QuizScreen(
             }
         }
 
+        OutlinedButton(
+            onClick = {
+                focusManager.clearFocus(force = true)
+                showCardEditor = true
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("カードを編集")
+        }
+        Spacer(Modifier.height(8.dp))
+
         if (phase == Phase.ASKING) {
             if (reverse) {
                 choices.forEach { option ->
@@ -3183,7 +3379,7 @@ private fun QuizScreen(
 
 @Composable
 private fun FlashcardScreen(
-    items: List<Pair<String, String>>,
+    items: List<QuizItem>,
     secDeci: Int,
     speechEnabled: Boolean,
     speechTarget: FlashSpeechTarget,
@@ -3195,6 +3391,8 @@ private fun FlashcardScreen(
     showBothInitially: Boolean,
     initialFontSizeSp: Int,
     onGameFontSizeChanged: (Int) -> Unit,
+    onSaveCardEdit: (QuizItem, List<String>) -> Unit,
+    onClearCardEdit: (QuizItem) -> Unit,
     onDone: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -3265,6 +3463,9 @@ private fun FlashcardScreen(
     var repeatIndex by remember { mutableIntStateOf(1) }
     var replayToken by remember { mutableIntStateOf(0) }
     var gameFontSizeSp by remember { mutableIntStateOf(initialFontSizeSp.coerceIn(16, 96)) }
+    var showCardEditor by remember { mutableStateOf(false) }
+    var pausedBeforeEditor by remember { mutableStateOf(false) }
+    var editRevision by remember { mutableIntStateOf(0) }
 
     val effectiveSpeech = speechEnabled && !ttsFailed
 
@@ -3347,6 +3548,7 @@ private fun FlashcardScreen(
         backWaitDeci,
         repeatCount,
         readParentheses,
+        editRevision,
     ) {
         if (finished || paused) return@LaunchedEffect
         if (!effectiveSpeech) {
@@ -3359,7 +3561,9 @@ private fun FlashcardScreen(
         }
         if (!ttsReady) return@LaunchedEffect
 
-        val (front, back) = items[index]
+        val currentItem = items[index]
+        val front = currentItem.question
+        val back = currentItem.displayAnswer
         if (!showingBack) {
             if (speechTarget != FlashSpeechTarget.BACK) {
                 speakAndWait(front, "front-$index-$repeatIndex-$replayToken")
@@ -3380,6 +3584,30 @@ private fun FlashcardScreen(
                 goForward()
             }
         }
+    }
+
+    if (showCardEditor) {
+        CardEditDialog(
+            item = items[index],
+            onDismiss = {
+                showCardEditor = false
+                paused = pausedBeforeEditor
+            },
+            onSave = { editedFields ->
+                onSaveCardEdit(items[index], editedFields)
+                editRevision++
+                replayToken++
+                showCardEditor = false
+                paused = pausedBeforeEditor
+            },
+            onReset = {
+                onClearCardEdit(items[index])
+                editRevision++
+                replayToken++
+                showCardEditor = false
+                paused = pausedBeforeEditor
+            },
+        )
     }
 
     if (finished) {
@@ -3408,7 +3636,9 @@ private fun FlashcardScreen(
         return
     }
 
-    val (front, back) = items[index]
+    val currentItem = items[index]
+    val front = currentItem.question
+    val back = currentItem.displayAnswer
     val progressTotal = when {
         !effectiveSpeech -> perCardMillis
         showingBack -> backWaitDeci.coerceIn(0, 600) * 100L
@@ -3501,6 +3731,34 @@ private fun FlashcardScreen(
                 }
             }
         }
+        OutlinedButton(
+            onClick = {
+                pausedBeforeEditor = paused
+                paused = true
+                tts.stop()
+                showCardEditor = true
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("カードを編集")
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = {
+                val query = cleanText(front)
+                if (query.isNotBlank()) {
+                    val url = "https://www.google.com/search?tbm=isch&q=${Uri.encode(query)}"
+                    runCatching {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = cleanText(front).isNotBlank(),
+        ) {
+            Text("Google画像で検索")
+        }
+        Spacer(Modifier.height(8.dp))
         if (effectiveSpeech) {
             OutlinedButton(
                 onClick = {
