@@ -347,3 +347,11 @@ git add -A && git commit -m "update" && git push
 - Webの更新取り込みは既存deckIdを維持するため、同じnoteIdの編集も維持される。元デッキで更新された未編集フィールドは新内容を反映し、編集済みフィールドだけを再適用する。
 - 編集ダイアログの「編集を取り消す」で、そのカードのKanjiQuiz内上書きだけを削除できる。
 - Webの全データバックアップ/復元に `cardEdits` を追加。
+
+
+## v1.22 / Web v0.1.24 追加仕様
+
+- `flashManualAdvanceWhenShowBoth`（既定ON）を追加。`flashShowBothInitially`と同時にONの場合、めくりモードはカードを自動送りせず、読み上げ終了後も「次へ」を待つ。進捗バーも表示しない。
+- `edgeReaderCount`（既定20）を追加。現在選択中の問題側・回答側フィールドから指定枚数をランダム抽出し、カード内容だけを含む長文HTMLを生成する。
+- Web版の `reader.html` / `reader.js` は同一オリジンの `localStorage` に生成済み文章を保存・表示する。FirefoxとEdgeのストレージは共有されないため、Firefoxから使う場合は単体HTML保存を使用する。
+- Android版はSAFでHTMLを保存し、`ACTION_VIEW`でEdge (`com.microsoft.emmx`) を優先して開く。元AnkiDroidデータへの書き込みはない。

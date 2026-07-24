@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.23";
+const APP_VERSION = "0.1.24";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -32,6 +32,8 @@ const DEFAULT_SETTINGS = {
   flashRepeatCount: 1,
   flashSpeechReadParentheses: false,
   flashShowBothInitially: false,
+  flashManualAdvanceWhenShowBoth: true,
+  edgeReaderCount: 20,
   reverse: false,
   gameMode: "NORMAL",
   weakPriority: true,
@@ -138,6 +140,10 @@ function loadSettings() {
     flashRepeatCount: clampInt(saved.flashRepeatCount ?? DEFAULT_SETTINGS.flashRepeatCount, 1, 9),
     flashSpeechReadParentheses: Boolean(saved.flashSpeechReadParentheses),
     flashShowBothInitially: Boolean(saved.flashShowBothInitially),
+    flashManualAdvanceWhenShowBoth: saved.flashManualAdvanceWhenShowBoth == null
+      ? DEFAULT_SETTINGS.flashManualAdvanceWhenShowBoth
+      : Boolean(saved.flashManualAdvanceWhenShowBoth),
+    edgeReaderCount: clampInt(saved.edgeReaderCount ?? DEFAULT_SETTINGS.edgeReaderCount, 1, 9999),
     gameFontSize: clampInt(saved.gameFontSize ?? DEFAULT_SETTINGS.gameFontSize, 16, 96),
     gameMode: saved.gameMode === "DAILY" ? "NORMAL" : (saved.gameMode || DEFAULT_SETTINGS.gameMode),
     newOnly: Boolean(saved.newOnly)
@@ -929,6 +935,61 @@ function downloadJson(filename, data) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function readerSentence(value) {
+  const text = cleanText(value).replace(/[↑↓]/g, " ").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return /[。！？!?]$/.test(text) ? text : `${text}。`;
+}
+
+function edgeReaderCards(deck, prefs, count) {
+  const cards = deck.notes.map(note => {
+    const fields = effectiveNoteFields(deck, note);
+    const question = joinFields(fields, prefs.qFields);
+    const answer = joinFields(fields, prefs.aFields);
+    return { question, answer };
+  }).filter(card => card.question || card.answer);
+  return shuffle(cards).slice(0, clampInt(count, 1, 9999));
+}
+
+function edgeReaderText(cards) {
+  return cards.map(card => [readerSentence(card.question), readerSentence(card.answer)]
+    .filter(Boolean).join("\n"))
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function edgeReaderHtml(title, text) {
+  const sections = text.split(/\n\n+/).map(block => {
+    const paragraphs = block.split(/\n+/).filter(Boolean)
+      .map(line => `<p>${escapeHtml(line)}</p>`).join("");
+    return `<section>${paragraphs}</section>`;
+  }).join("");
+  return `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>
+html{color-scheme:light dark}body{margin:0;padding:32px 22px 64px;font-family:sans-serif;font-size:28px;line-height:1.9}main{max-width:760px;margin:0 auto}section{margin:0 0 1.8em;break-inside:avoid}p{margin:0 0 .45em}
+</style>
+</head>
+<body><main>${sections}</main></body>
+</html>`;
+}
+
+function downloadHtml(filename, html) {
+  const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 async function refreshDecks() {
   state.decks = (await dbGetAllDecks()).sort((a, b) => a.name.localeCompare(b.name, "ja"));
 }
@@ -1459,6 +1520,17 @@ function renderFields() {
         <div id="three-correct-panel" class="notice" hidden></div>
       </div>
 
+      <div class="card stack">
+        <strong>Microsoft Edgeの読み上げ用</strong>
+        <div class="subtle small">選んだ枚数の問題と答えを1つの長い文章にまとめます。長文ページにはカード内容以外を表示しません。</div>
+        <label><span>まとめるカード枚数</span>
+          <input class="field" id="edge-reader-count" type="number" min="1" max="9999" value="${settings.edgeReaderCount}">
+        </label>
+        <button class="btn btn-primary btn-wide" id="open-edge-reader" type="button">Edge読み上げ用ページを開く</button>
+        <button class="btn btn-ghost btn-wide" id="download-edge-reader" type="button">Edge用HTMLを保存</button>
+        <div class="subtle small">KanjiQuizをEdgeで開いている場合は上のボタンを使います。Firefoxから作る場合はHTMLを保存し、そのファイルをEdgeで開いてください。</div>
+      </div>
+
       <div id="field-error"></div>
       <button class="btn btn-ghost btn-wide" id="open-card-progress" type="button">カード別の成功回数を見る</button>
       <button class="btn btn-primary btn-wide" id="start-game" type="button">スタート</button>
@@ -1526,6 +1598,39 @@ function renderFields() {
       saveFieldPrefs(deck.id, prefs);
       updateThreeCorrectPanel();
     });
+  });
+
+  const buildEdgeReaderDocument = () => {
+    if (!prefs.qFields.length || !prefs.aFields.length) {
+      document.getElementById("field-error").innerHTML =
+        `<div class="error">問題側とこたえ側を、それぞれ1つ以上選んでください。</div>`;
+      return null;
+    }
+    const count = clampInt(document.getElementById("edge-reader-count").value, 1, 9999);
+    const nextSettings = { ...loadSettings(), edgeReaderCount: count };
+    saveSettings(nextSettings);
+    const cards = edgeReaderCards(deck, prefs, count);
+    if (!cards.length) {
+      document.getElementById("field-error").innerHTML =
+        `<div class="error">Edge読み上げ用にまとめられるカードがありません。</div>`;
+      return null;
+    }
+    const text = edgeReaderText(cards);
+    return { text, html: edgeReaderHtml(deck.name, text) };
+  };
+
+  document.getElementById("open-edge-reader").addEventListener("click", () => {
+    const documentData = buildEdgeReaderDocument();
+    if (!documentData) return;
+    localStorage.setItem("kq.edgeReaderText", documentData.text);
+    localStorage.setItem("kq.edgeReaderTitle", deck.name);
+    window.open("./reader.html", "_blank");
+  });
+
+  document.getElementById("download-edge-reader").addEventListener("click", () => {
+    const documentData = buildEdgeReaderDocument();
+    if (!documentData) return;
+    downloadHtml(`${safeFilename(deck.name)}-edge-read-aloud.html`, documentData.html);
   });
 
   document.getElementById("open-card-progress").addEventListener("click", () => {
@@ -2766,6 +2871,8 @@ function startFlash(items, settings) {
     repeatCount: clampInt(settings.flashRepeatCount, 1, 9),
     readParentheses: Boolean(settings.flashSpeechReadParentheses),
     showBothInitially: Boolean(settings.flashShowBothInitially),
+    manualAdvanceWhenShowBoth: Boolean(settings.flashManualAdvanceWhenShowBoth),
+    awaitingManualNext: false,
     phase: "FRONT",
     repeatIndex: 1,
     speaking: false,
@@ -2879,9 +2986,16 @@ function resetFlashCard() {
   if (!flash) return;
   flash.phase = "FRONT";
   flash.repeatIndex = 1;
+  flash.awaitingManualNext = false;
+  const manualAdvance = flash.showBothInitially && flash.manualAdvanceWhenShowBoth;
   flash.remainingMs = flash.speechEnabled ? flash.frontWaitDeci * 100 : flash.secDeci * 100;
   flash.lastTick = performance.now();
   renderFlashCardContent();
+  if (!flash.speechEnabled && manualAdvance) {
+    flash.awaitingManualNext = true;
+    updateFlashUi();
+    return;
+  }
   beginFlashPhase({ preserveWait: true });
 }
 
@@ -2908,7 +3022,7 @@ function renderFlashCardContent() {
 
 function beginFlashPhase({ preserveWait = false } = {}) {
   const flash = state.flash;
-  if (!flash || flash.paused) return;
+  if (!flash || flash.paused || flash.awaitingManualNext) return;
   cancelFlashSpeech();
   if (flash.speechWatchdogId != null) clearTimeout(flash.speechWatchdogId);
   flash.speechWatchdogId = null;
@@ -2933,6 +3047,11 @@ function beginFlashPhase({ preserveWait = false } = {}) {
   const raw = flash.phase === "FRONT" ? item.question : item.answer;
   const text = flashSpeechText(raw, flash.readParentheses);
   if (!shouldSpeak || !text) {
+    if (flash.showBothInitially && flash.manualAdvanceWhenShowBoth &&
+        flash.phase === "BACK" && flash.repeatIndex >= flash.repeatCount) {
+      flash.awaitingManualNext = true;
+      flash.remainingMs = 0;
+    }
     updateFlashUi();
     return;
   }
@@ -2946,6 +3065,11 @@ function beginFlashPhase({ preserveWait = false } = {}) {
     flash.speechWatchdogId = null;
     flash.speaking = false;
     flash.lastTick = performance.now();
+    if (flash.showBothInitially && flash.manualAdvanceWhenShowBoth &&
+        flash.phase === "BACK" && flash.repeatIndex >= flash.repeatCount) {
+      flash.awaitingManualNext = true;
+      flash.remainingMs = 0;
+    }
     updateFlashUi();
   };
   utterance.onend = finishSpeech;
@@ -2959,7 +3083,7 @@ function beginFlashPhase({ preserveWait = false } = {}) {
 
 function tickFlash() {
   const flash = state.flash;
-  if (!flash || flash.paused || document.hidden) {
+  if (!flash || flash.paused || flash.awaitingManualNext || document.hidden) {
     if (flash) flash.lastTick = performance.now();
     return;
   }
@@ -2997,6 +3121,12 @@ function advanceFlashPhase() {
     beginFlashPhase({ preserveWait: true });
     return;
   }
+  if (flash.showBothInitially && flash.manualAdvanceWhenShowBoth) {
+    flash.awaitingManualNext = true;
+    flash.remainingMs = 0;
+    updateFlashUi();
+    return;
+  }
   changeFlash(1);
 }
 
@@ -3021,20 +3151,31 @@ function updateFlashUi() {
   if (!flash) return;
   document.getElementById("flash-count").textContent = `${flash.index + 1} / ${flash.items.length}`;
   const speechActive = flash.speechEnabled && "speechSynthesis" in window;
-  document.getElementById("flash-phase").textContent = speechActive
-    ? `${flash.phase === "FRONT" ? "表面" : "裏面"}・${flash.repeatIndex}/${flash.repeatCount}回${flash.speaking ? "・読み上げ中" : ""}`
-    : "";
-  document.getElementById("flash-pause").textContent = flash.paused ? "再開" : "一時停止";
+  document.getElementById("flash-phase").textContent = flash.awaitingManualNext
+    ? "読み上げ完了・次へを押してください"
+    : speechActive
+      ? `${flash.phase === "FRONT" ? "表面" : "裏面"}・${flash.repeatIndex}/${flash.repeatCount}回${flash.speaking ? "・読み上げ中" : ""}`
+      : "";
+  const pauseButton = document.getElementById("flash-pause");
+  pauseButton.textContent = flash.paused ? "再開" : "一時停止";
+  pauseButton.disabled = flash.awaitingManualNext;
   const repeatButton = document.getElementById("flash-repeat-speech");
   if (repeatButton) {
     repeatButton.hidden = !speechActive;
     repeatButton.textContent = flash.phase === "FRONT" ? "表面をもう一度読む" : "裏面をもう一度読む";
   }
-  const total = speechActive
-    ? Math.max(1, (flash.phase === "FRONT" ? flash.frontWaitDeci : flash.backWaitDeci) * 100)
-    : Math.max(1, flash.secDeci * 100);
-  const percent = Math.max(0, Math.min(100, (flash.remainingMs / total) * 100));
-  document.getElementById("flash-progress").innerHTML = `<div class="progress"><div style="width:${percent}%"></div></div>`;
+  const manualAdvance = flash.showBothInitially && flash.manualAdvanceWhenShowBoth;
+  if (manualAdvance) {
+    document.getElementById("flash-progress").innerHTML = flash.awaitingManualNext
+      ? `<div class="subtle small">次へを押すまでこのカードを表示します。</div>`
+      : "";
+  } else {
+    const total = speechActive
+      ? Math.max(1, (flash.phase === "FRONT" ? flash.frontWaitDeci : flash.backWaitDeci) * 100)
+      : Math.max(1, flash.secDeci * 100);
+    const percent = Math.max(0, Math.min(100, (flash.remainingMs / total) * 100));
+    document.getElementById("flash-progress").innerHTML = `<div class="progress"><div style="width:${percent}%"></div></div>`;
+  }
 }
 function renderSettings() {
   const settings = loadSettings();
@@ -3065,6 +3206,8 @@ function renderSettings() {
           </div>
           <label class="row"><input id="s-flash-show-both" type="checkbox" ${settings.flashShowBothInitially ? "checked" : ""}><span>最初から問題と答えを両方表示</span></label>
           <div class="subtle small">オンでは、読み上げ中も答えを隠さず最初から表示します。</div>
+          <label class="row"><input id="s-flash-manual-advance" type="checkbox" ${settings.flashManualAdvanceWhenShowBoth ? "checked" : ""}><span>表裏同時表示時は自動送りしない</span></label>
+          <div class="subtle small">読み上げが終わっても停止し、「次へ」を押すまで同じカードを表示します。</div>
           <label class="row"><input id="s-flash-read-parentheses" type="checkbox" ${settings.flashSpeechReadParentheses ? "checked" : ""}><span>括弧内の注釈も読む</span></label>
           <div class="subtle small">↑・↓・HTMLタグは読み上げ時だけ除外します。</div>
         </div>
@@ -3114,6 +3257,7 @@ function renderSettings() {
       flashRepeatCount: clampInt(document.getElementById("s-flash-repeat").value, 1, 9),
       flashSpeechReadParentheses: document.getElementById("s-flash-read-parentheses").checked,
       flashShowBothInitially: document.getElementById("s-flash-show-both").checked,
+      flashManualAdvanceWhenShowBoth: document.getElementById("s-flash-manual-advance").checked,
       gameFontSize: clampInt(document.getElementById("s-font-size").value, 16, 96),
       autoAdvance: document.getElementById("s-auto").checked,
       newOnly: document.getElementById("s-new-only").checked,

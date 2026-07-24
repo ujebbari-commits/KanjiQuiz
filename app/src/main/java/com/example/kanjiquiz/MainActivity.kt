@@ -106,7 +106,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.21"
+private const val APP_VERSION = "1.22"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -131,6 +131,8 @@ data class Settings(
     val flashRepeatCount: Int = 1,
     val flashSpeechReadParentheses: Boolean = false,
     val flashShowBothInitially: Boolean = false,
+    val flashManualAdvanceWhenShowBoth: Boolean = true,
+    val edgeReaderCount: Int = 20,
     val reverse: Boolean = false,
     val gameMode: GameMode = GameMode.NORMAL,
     val weakPriority: Boolean = true,
@@ -218,6 +220,8 @@ class Store(context: Context) {
         flashRepeatCount = sp.getInt("flashRepeatCount", 1).coerceIn(1, 9),
         flashSpeechReadParentheses = sp.getBoolean("flashSpeechReadParentheses", false),
         flashShowBothInitially = sp.getBoolean("flashShowBothInitially", false),
+        flashManualAdvanceWhenShowBoth = sp.getBoolean("flashManualAdvanceWhenShowBoth", true),
+        edgeReaderCount = sp.getInt("edgeReaderCount", 20).coerceIn(1, 9999),
         reverse = sp.getBoolean("reverse", false),
         gameMode = runCatching { GameMode.valueOf(sp.getString("gameMode", "NORMAL")!!) }
             .getOrDefault(GameMode.NORMAL)
@@ -244,6 +248,8 @@ class Store(context: Context) {
             .putInt("flashRepeatCount", s.flashRepeatCount.coerceIn(1, 9))
             .putBoolean("flashSpeechReadParentheses", s.flashSpeechReadParentheses)
             .putBoolean("flashShowBothInitially", s.flashShowBothInitially)
+            .putBoolean("flashManualAdvanceWhenShowBoth", s.flashManualAdvanceWhenShowBoth)
+            .putInt("edgeReaderCount", s.edgeReaderCount.coerceIn(1, 9999))
             .putBoolean("reverse", s.reverse)
             .putString("gameMode", s.gameMode.name)
             .putBoolean("weakPriority", s.weakPriority)
@@ -632,6 +638,52 @@ private fun applyFieldsToQuizItem(item: QuizItem, updatedFields: List<String>) {
 private fun safeFileName(name: String): String =
     name.replace(Regex("[\\/:*?\"<>|]"), "_").take(80).ifBlank { "deck" }
 
+private fun htmlEscape(value: String): String = value
+    .replace("&", "&amp;")
+    .replace("<", "&lt;")
+    .replace(">", "&gt;")
+    .replace("\"", "&quot;")
+    .replace("'", "&#39;")
+
+private fun edgeReaderText(value: String): String {
+    val cleaned = cleanText(value)
+        .replace('↑', ' ')
+        .replace('↓', ' ')
+        .replace(Regex("\\s+"), " ")
+        .trim()
+    if (cleaned.isBlank()) return ""
+    return if (cleaned.last() in listOf('。', '！', '？', '!', '?')) cleaned else "$cleaned。"
+}
+
+private fun buildEdgeReaderHtml(deckName: String, cards: List<Pair<String, String>>): String {
+    val sections = cards.joinToString("\n") { (question, answer) ->
+        val q = edgeReaderText(question)
+        val a = edgeReaderText(answer)
+        buildString {
+            append("<section>")
+            if (q.isNotBlank()) append("<p>").append(htmlEscape(q)).append("</p>")
+            if (a.isNotBlank()) append("<p>").append(htmlEscape(a)).append("</p>")
+            append("</section>")
+        }
+    }
+    return """<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${htmlEscape(deckName)}</title>
+<style>
+html { color-scheme: light dark; }
+body { margin: 0; padding: 32px 22px 64px; font-family: sans-serif; font-size: 28px; line-height: 1.9; }
+main { max-width: 760px; margin: 0 auto; }
+section { margin: 0 0 1.8em; break-inside: avoid; }
+p { margin: 0 0 .45em; }
+</style>
+</head>
+<body><main>$sections</main></body>
+</html>"""
+}
+
 private fun buildWebDeckJson(
     deckName: String,
     notes: List<Pair<Long, List<String>>>,
@@ -742,6 +794,35 @@ private fun App() {
             }
         }
         pendingWebExport = null
+    }
+
+    var pendingEdgeReaderHtml by remember { mutableStateOf<String?>(null) }
+    var edgeReaderMessage by remember { mutableStateOf<String?>(null) }
+    val edgeReaderLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/html")
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                val content = pendingEdgeReaderHtml ?: error("書き出す文章がありません。")
+                val output = context.contentResolver.openOutputStream(uri)
+                    ?: error("保存先を開けませんでした。")
+                output.bufferedWriter(Charsets.UTF_8).use { it.write(content) }
+                val viewIntent = Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, "text/html")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                val edgeIntent = Intent(viewIntent).setPackage("com.microsoft.emmx")
+                runCatching { context.startActivity(edgeIntent) }
+                    .recoverCatching {
+                        context.startActivity(Intent.createChooser(viewIntent, "Edgeで開く"))
+                    }
+                    .getOrThrow()
+            }.onSuccess {
+                edgeReaderMessage = "Edge読み上げ用HTMLを保存しました。Edgeのメニューから「音声で読み上げる」を開始してください。"
+            }.onFailure {
+                edgeReaderMessage = "Edge用HTMLの保存または起動に失敗しました: ${it.message}"
+            }
+        }
+        pendingEdgeReaderHtml = null
     }
 
     var settings by remember { mutableStateOf(store.loadSettings()) }
@@ -1280,6 +1361,7 @@ private fun App() {
                 threeCorrectSummary = threeCorrectSummary,
                 error = fieldError,
                 exportMessage = webExportMessage,
+                edgeReaderMessage = edgeReaderMessage,
                 onToggleQ = { i ->
                     if (qFields.contains(i)) qFields.remove(i) else qFields.add(i)
                     store.saveDeckFieldPrefs(deckName, qFields, aFields)
@@ -1317,6 +1399,28 @@ private fun App() {
                     )
                     webExportMessage = null
                     webExportLauncher.launch("${safeFileName(deckName)}.kanjiquiz.json.txt")
+                },
+                onExportEdge = { requestedCount ->
+                    if (qFields.isEmpty() || aFields.isEmpty()) {
+                        fieldError = "問題側とこたえ側を、それぞれ1つ以上選んでください。"
+                    } else {
+                        val cards = notes.shuffled().mapNotNull { (id, originalFields) ->
+                            val effectiveFields = store.applyCardEdits(deckName, id, originalFields)
+                            val question = joinFields(effectiveFields, qFields)
+                            val answer = joinFields(effectiveFields, aFields)
+                            if (question.isBlank() && answer.isBlank()) null else question to answer
+                        }.take(requestedCount.coerceIn(1, 9999))
+                        if (cards.isEmpty()) {
+                            fieldError = "Edge読み上げ用にまとめられるカードがありません。"
+                        } else {
+                            val count = requestedCount.coerceIn(1, 9999)
+                            settings = settings.copy(edgeReaderCount = count)
+                            store.saveSettings(settings)
+                            pendingEdgeReaderHtml = buildEdgeReaderHtml(deckName, cards)
+                            edgeReaderMessage = null
+                            edgeReaderLauncher.launch("${safeFileName(deckName)}-edge-read-aloud.html")
+                        }
+                    }
                 },
                 onStart = {
                     if (qFields.isEmpty() || aFields.isEmpty()) {
@@ -1429,6 +1533,7 @@ private fun App() {
                 repeatCount = settings.flashRepeatCount,
                 readParentheses = settings.flashSpeechReadParentheses,
                 showBothInitially = settings.flashShowBothInitially,
+                manualAdvanceWhenShowBoth = settings.flashManualAdvanceWhenShowBoth,
                 initialFontSizeSp = settings.gameFontSizeSp,
                 onGameFontSizeChanged = { size ->
                     settings = settings.copy(gameFontSizeSp = size)
@@ -1826,6 +1931,28 @@ private fun GameFontSizeField(value: Int, onChange: (Int) -> Unit) {
 }
 
 @Composable
+private fun EdgeReaderCountField(value: Int, onChange: (Int) -> Unit) {
+    var text by remember(value) { mutableStateOf(value.toString()) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { raw ->
+            val digits = raw.filter { it.isDigit() }.take(4)
+            text = digits
+            digits.toIntOrNull()?.takeIf { it in 1..9999 }?.let(onChange)
+        },
+        modifier = Modifier.fillMaxWidth(),
+        label = { Text("まとめるカード枚数") },
+        supportingText = { Text("選択中の問題側・こたえ側を、1つの長いHTML文章にまとめます") },
+        suffix = { Text("枚") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Number,
+            imeAction = ImeAction.Done,
+        ),
+    )
+}
+
+@Composable
 private fun SettingsScreen(
     settings: Settings,
     onChange: (Settings) -> Unit,
@@ -1958,6 +2085,28 @@ private fun SettingsScreen(
                     checked = settings.flashShowBothInitially,
                     onCheckedChange = { onChange(settings.copy(flashShowBothInitially = it)) },
                 )
+            }
+            if (settings.flashShowBothInitially) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("表裏同時表示時は自動送りしない", fontWeight = FontWeight.Bold)
+                        Text(
+                            "読み上げが終わっても停止し、「次へ」を押すまで同じカードを表示します。",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = settings.flashManualAdvanceWhenShowBoth,
+                        onCheckedChange = {
+                            onChange(settings.copy(flashManualAdvanceWhenShowBoth = it))
+                        },
+                    )
+                }
             }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -2214,6 +2363,7 @@ private fun FieldScreen(
     threeCorrectSummary: Pair<Int, Int>?,
     error: String?,
     exportMessage: String?,
+    edgeReaderMessage: String?,
     onToggleQ: (Int) -> Unit,
     onToggleA: (Int) -> Unit,
     onMode: (Mode) -> Unit,
@@ -2221,6 +2371,7 @@ private fun FieldScreen(
     onResetThreeCorrect: () -> Unit,
     onOpenCardProgress: () -> Unit,
     onExportWeb: () -> Unit,
+    onExportEdge: (Int) -> Unit,
     onStart: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -2468,6 +2619,32 @@ private fun FieldScreen(
             Text(
                 exportMessage,
                 color = if (exportMessage.startsWith("保存に失敗")) WrongRed else CorrectGreen,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+        Text("Microsoft Edgeの読み上げ用", fontWeight = FontWeight.Bold)
+        Text(
+            "選んだ枚数の問題と答えを、余計なボタンのない1つのHTML文章にまとめます。保存後にEdgeで開き、Edgeの「音声で読み上げる」を1回開始してください。",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(vertical = 4.dp),
+        )
+        EdgeReaderCountField(settings.edgeReaderCount) { count ->
+            onChangeSettings(settings.copy(edgeReaderCount = count))
+        }
+        OutlinedButton(
+            onClick = { onExportEdge(settings.edgeReaderCount) },
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        ) {
+            Text("Edge読み上げ用HTMLを作る")
+        }
+        if (edgeReaderMessage != null) {
+            Text(
+                edgeReaderMessage,
+                color = if (edgeReaderMessage.contains("失敗")) WrongRed else CorrectGreen,
                 fontSize = 13.sp,
                 modifier = Modifier.padding(top = 8.dp),
             )
@@ -3389,6 +3566,7 @@ private fun FlashcardScreen(
     repeatCount: Int,
     readParentheses: Boolean,
     showBothInitially: Boolean,
+    manualAdvanceWhenShowBoth: Boolean,
     initialFontSizeSp: Int,
     onGameFontSizeChanged: (Int) -> Unit,
     onSaveCardEdit: (QuizItem, List<String>) -> Unit,
@@ -3466,8 +3644,10 @@ private fun FlashcardScreen(
     var showCardEditor by remember { mutableStateOf(false) }
     var pausedBeforeEditor by remember { mutableStateOf(false) }
     var editRevision by remember { mutableIntStateOf(0) }
+    var awaitingManualNext by remember { mutableStateOf(false) }
 
     val effectiveSpeech = speechEnabled && !ttsFailed
+    val manualAdvanceActive = showBothInitially && manualAdvanceWhenShowBoth
 
     fun changeGameFontSize(delta: Int) {
         val next = (gameFontSizeSp + delta).coerceIn(16, 96)
@@ -3483,6 +3663,7 @@ private fun FlashcardScreen(
         elapsed = 0f
         showingBack = false
         repeatIndex = 1
+        awaitingManualNext = false
         completedUtteranceId = null
     }
 
@@ -3548,10 +3729,17 @@ private fun FlashcardScreen(
         backWaitDeci,
         repeatCount,
         readParentheses,
+        manualAdvanceActive,
+        awaitingManualNext,
         editRevision,
     ) {
-        if (finished || paused) return@LaunchedEffect
+        if (finished || paused || awaitingManualNext) return@LaunchedEffect
         if (!effectiveSpeech) {
+            if (manualAdvanceActive) {
+                awaitingManualNext = true
+                elapsed = 0f
+                return@LaunchedEffect
+            }
             while (elapsed < perCardMillis) {
                 delay(50)
                 elapsed += 50f
@@ -3575,12 +3763,18 @@ private fun FlashcardScreen(
             if (speechTarget != FlashSpeechTarget.FRONT) {
                 speakAndWait(back, "back-$index-$repeatIndex-$replayToken")
             }
-            waitWithProgress(backWaitDeci.coerceIn(0, 600) * 100L)
             if (repeatIndex < repeatCount.coerceIn(1, 9)) {
+                if (!manualAdvanceActive) {
+                    waitWithProgress(backWaitDeci.coerceIn(0, 600) * 100L)
+                }
                 repeatIndex += 1
                 showingBack = false
                 elapsed = 0f
+            } else if (manualAdvanceActive) {
+                awaitingManualNext = true
+                elapsed = 0f
             } else {
+                waitWithProgress(backWaitDeci.coerceIn(0, 600) * 100L)
                 goForward()
             }
         }
@@ -3656,7 +3850,13 @@ private fun FlashcardScreen(
                 Text("${index + 1} / ${items.size}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (effectiveSpeech) {
                     Text(
-                        if (showingBack) "裏面・${repeatIndex}/${repeatCount.coerceIn(1, 9)}回" else "表面・${repeatIndex}/${repeatCount.coerceIn(1, 9)}回",
+                        if (awaitingManualNext) {
+                            "読み上げ完了・次へを押してください"
+                        } else if (showingBack) {
+                            "裏面・${repeatIndex}/${repeatCount.coerceIn(1, 9)}回"
+                        } else {
+                            "表面・${repeatIndex}/${repeatCount.coerceIn(1, 9)}回"
+                        },
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -3674,10 +3874,18 @@ private fun FlashcardScreen(
             }
         }
         Spacer(Modifier.height(8.dp))
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier.fillMaxWidth().height(6.dp),
-        )
+        if (!manualAdvanceActive) {
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth().height(6.dp),
+            )
+        } else if (awaitingManualNext) {
+            Text(
+                "次へを押すまでこのカードを表示します。",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         if (speechEnabled && !ttsReady && !ttsFailed) {
             Text(
                 "読み上げを準備中…",

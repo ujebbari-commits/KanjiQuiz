@@ -1,9 +1,11 @@
-const CACHE_NAME = "kanjiquiz-web-v0.1.23";
+const CACHE_NAME = "kanjiquiz-web-v0.1.24";
 const ASSETS = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.js",
+  "./reader.html",
+  "./reader.js",
   "./manifest.webmanifest",
   "./icons/icon.svg",
   "./icons/icon-192.png",
