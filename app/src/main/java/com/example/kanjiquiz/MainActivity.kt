@@ -17,6 +17,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -67,8 +68,16 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
@@ -106,7 +115,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.22"
+private const val APP_VERSION = "1.23"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -2907,6 +2916,8 @@ private fun QuizScreen(
     var editRevision by remember { mutableIntStateOf(0) }
     val logs = remember { mutableStateListOf<AnswerLog>() }
     val focusManager = LocalFocusManager.current
+    val hardwareKeyFocusRequester = remember { FocusRequester() }
+    var answerInputFocused by remember { mutableStateOf(false) }
     val startedAt = remember { System.currentTimeMillis() }
 
     fun changeGameFontSize(delta: Int) {
@@ -3134,6 +3145,12 @@ private fun QuizScreen(
 
     BackHandler { showConfirm = true }
 
+    LaunchedEffect(questionSerial, phase, showConfirm, showCardEditor, answerInputFocused) {
+        if (!showConfirm && !showCardEditor && !answerInputFocused) {
+            hardwareKeyFocusRequester.requestFocus()
+        }
+    }
+
     LaunchedEffect(questionSerial, item.noteId) {
         onCardShown(item.noteId)
     }
@@ -3205,7 +3222,23 @@ private fun QuizScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 20.dp, vertical = if (keyboardVisible) 8.dp else 20.dp),
+            .padding(horizontal = 20.dp, vertical = if (keyboardVisible) 8.dp else 20.dp)
+            .focusRequester(hardwareKeyFocusRequester)
+            .focusable()
+            .onPreviewKeyEvent { event ->
+                if (event.key != Key.Spacebar || answerInputFocused || showConfirm || showCardEditor) {
+                    false
+                } else {
+                    when (event.type) {
+                        KeyEventType.KeyDown -> true
+                        KeyEventType.KeyUp -> {
+                            if (phase == Phase.ASKING) passQuestion() else goNext()
+                            true
+                        }
+                        else -> false
+                    }
+                }
+            },
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -3498,7 +3531,9 @@ private fun QuizScreen(
                     OutlinedTextField(
                         value = input,
                         onValueChange = { input = it },
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .onFocusChanged { answerInputFocused = it.isFocused },
                         placeholder = { Text("よみを ひらがなで入力") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
@@ -3575,6 +3610,7 @@ private fun FlashcardScreen(
 ) {
     val context = LocalContext.current
     val view = LocalView.current
+    val hardwareKeyFocusRequester = remember { FocusRequester() }
     val handler = remember { Handler(Looper.getMainLooper()) }
     var ttsReady by remember { mutableStateOf(false) }
     var ttsFailed by remember { mutableStateOf(false) }
@@ -3646,6 +3682,10 @@ private fun FlashcardScreen(
     var editRevision by remember { mutableIntStateOf(0) }
     var awaitingManualNext by remember { mutableStateOf(false) }
 
+    LaunchedEffect(showCardEditor, finished) {
+        if (!showCardEditor && !finished) hardwareKeyFocusRequester.requestFocus()
+    }
+
     val effectiveSpeech = speechEnabled && !ttsFailed
     val manualAdvanceActive = showBothInitially && manualAdvanceWhenShowBoth
 
@@ -3674,6 +3714,20 @@ private fun FlashcardScreen(
         } else {
             toCard(index + 1)
         }
+    }
+
+    fun handleSpaceKey() {
+        val answerVisible = !effectiveSpeech || showBothInitially || showingBack
+        if (answerVisible || awaitingManualNext) {
+            goForward()
+            return
+        }
+        tts.stop()
+        completedUtteranceId = null
+        replayToken += 1
+        awaitingManualNext = false
+        showingBack = true
+        elapsed = 0f
     }
 
     fun speechText(raw: String): String {
@@ -3840,7 +3894,21 @@ private fun FlashcardScreen(
     }.coerceAtLeast(1L)
     val progress = (elapsed / progressTotal).coerceIn(0f, 1f)
 
-    Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp)
+            .focusRequester(hardwareKeyFocusRequester)
+            .focusable()
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp && event.key == Key.Spacebar) {
+                    handleSpaceKey()
+                    true
+                } else {
+                    false
+                }
+            },
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,

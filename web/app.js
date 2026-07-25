@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.24";
+const APP_VERSION = "0.1.26";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -2079,6 +2079,7 @@ class QuizSession {
     this.paused = false;
     this.selectionPaused = false;
     this.timerId = null;
+    this.keyHandler = null;
     this.feedbackDeadline = null;
     this.lastTick = performance.now();
     this.retryNotice = "";
@@ -2121,7 +2122,8 @@ class QuizSession {
   }
 
   startTimer() {
-    this.stopTimer();
+    if (this.timerId != null) window.clearInterval(this.timerId);
+    this.timerId = null;
     this.lastTick = performance.now();
     this.timerId = window.setInterval(() => this.tick(), 100);
   }
@@ -2129,6 +2131,8 @@ class QuizSession {
   stopTimer() {
     if (this.timerId != null) window.clearInterval(this.timerId);
     this.timerId = null;
+    if (this.keyHandler) document.removeEventListener("keydown", this.keyHandler);
+    this.keyHandler = null;
   }
 
   tick() {
@@ -2358,6 +2362,30 @@ function renderQuiz() {
   document.getElementById("font-smaller").disabled = session.config.gameFontSize <= 16;
   document.getElementById("font-larger").disabled = session.config.gameFontSize >= 96;
   document.getElementById("quit-quiz").addEventListener("click", () => showQuitQuizModal(session));
+
+  session.keyHandler = event => {
+    if (event.code !== "Space" && event.key !== " ") return;
+    if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (document.getElementById("card-editor-overlay")) return;
+    if (document.getElementById("quiz-modal")?.childElementCount) return;
+
+    const target = event.target;
+    if (target instanceof HTMLElement &&
+        (target.matches("input, textarea, select, [contenteditable='true']") ||
+         target.closest("input, textarea, select, [contenteditable='true']"))) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    if (session.phase === "ASKING") {
+      session.judge(false, "", true);
+    } else if (session.phase === "FEEDBACK") {
+      session.goNext();
+    }
+  };
+  document.addEventListener("keydown", session.keyHandler);
+
   renderQuizQuestion(session);
   session.startTimer();
 }
@@ -2879,11 +2907,14 @@ function startFlash(items, settings) {
     speechToken: 0,
     speechWatchdogId: null,
     timerId: null,
+    keyHandler: null,
     remainingMs: settings.flashcardDeci * 100,
     lastTick: performance.now(),
     stop() {
       if (this.timerId != null) clearInterval(this.timerId);
       this.timerId = null;
+      if (this.keyHandler) document.removeEventListener("keydown", this.keyHandler);
+      this.keyHandler = null;
       this.speechToken += 1;
       this.speaking = false;
       if (this.speechWatchdogId != null) clearTimeout(this.speechWatchdogId);
@@ -2959,6 +2990,38 @@ function renderFlash() {
     if (!flash.speechEnabled || !speechSupported) return;
     beginFlashPhase({ preserveWait: false });
   });
+  flash.keyHandler = event => {
+    if (event.code !== "Space" && event.key !== " ") return;
+    if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
+    const target = event.target;
+    if (target instanceof HTMLElement &&
+        (target.matches("input, textarea, select, [contenteditable='true']") ||
+         target.closest("input, textarea, select, [contenteditable='true']"))) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+
+    const answerVisible = !flash.speechEnabled || flash.showBothInitially || flash.phase === "BACK";
+    if (answerVisible || flash.awaitingManualNext) {
+      changeFlash(1);
+      return;
+    }
+
+    cancelFlashSpeech();
+    if (flash.speechWatchdogId != null) clearTimeout(flash.speechWatchdogId);
+    flash.speechWatchdogId = null;
+    flash.speechToken += 1;
+    flash.speaking = false;
+    flash.awaitingManualNext = false;
+    flash.phase = "BACK";
+    flash.remainingMs = flash.backWaitDeci * 100;
+    flash.lastTick = performance.now();
+    renderFlashCardContent();
+    if (!flash.paused) beginFlashPhase({ preserveWait: true });
+  };
+  document.addEventListener("keydown", flash.keyHandler);
+
   document.getElementById("flash-edit-card").addEventListener("click", () => {
     const item = flash.items[flash.index];
     const wasPaused = flash.paused;

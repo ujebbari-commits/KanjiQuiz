@@ -355,3 +355,17 @@ git add -A && git commit -m "update" && git push
 - `edgeReaderCount`（既定20）を追加。現在選択中の問題側・回答側フィールドから指定枚数をランダム抽出し、カード内容だけを含む長文HTMLを生成する。
 - Web版の `reader.html` / `reader.js` は同一オリジンの `localStorage` に生成済み文章を保存・表示する。FirefoxとEdgeのストレージは共有されないため、Firefoxから使う場合は単体HTML保存を使用する。
 - Android版はSAFでHTMLを保存し、`ACTION_VIEW`でEdge (`com.microsoft.emmx`) を優先して開く。元AnkiDroidデータへの書き込みはない。
+
+
+## v1.23 / Web v0.1.25 追加仕様
+
+- めくりモードでPC/外付けキーボードのSpaceキーを操作キーとして扱う。答えが隠れていれば裏面表示、表示済みまたは表裏同時表示なら次カード。
+- Web版はinput/textarea/select/contenteditable上ではSpaceを処理せず、キー長押しのrepeatも無視する。画面離脱時にkeydownリスナーを解除する。
+- Android版はフォーカス可能なめくり画面でKeyUpのSpacebarを消費し、ソフトキーボード表示には影響しない。
+
+
+## v1.24 / Web v0.1.26 追加仕様
+
+- 全クイズ形式で外付け・PCキーボードのスペースキーを利用可能。
+- ASKING中はパス扱いで答えを表示、FEEDBACK中は次へ進む。
+- 入力欄、カード編集、確認ダイアログではショートカットを無効化。
