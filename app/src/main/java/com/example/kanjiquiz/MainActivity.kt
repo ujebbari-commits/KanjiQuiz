@@ -76,6 +76,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.nativeKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.Color
@@ -115,7 +116,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.23"
+private const val APP_VERSION = "1.26"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -2025,9 +2026,50 @@ private fun SettingsScreen(
         }
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-        ChipRow("めくりモード：1枚の表示時間（読み上げOFF時）",
+        ChipRow("めくりモード：問題・答えそれぞれの表示時間（読み上げOFF時）",
             listOf("2秒" to 20, "3秒" to 30, "5秒" to 50, "8秒" to 80),
             settings.flashcardDeci) { onChange(settings.copy(flashcardDeci = it)) }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("最初から問題と答えを両方表示", fontWeight = FontWeight.Bold)
+                Text(
+                    "読み上げのオン・オフに関係なく、めくり開始時の表示方法を切り替えます。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = settings.flashShowBothInitially,
+                onCheckedChange = { onChange(settings.copy(flashShowBothInitially = it)) },
+            )
+        }
+        if (settings.flashShowBothInitially) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("表裏同時表示時は自動送りしない", fontWeight = FontWeight.Bold)
+                    Text(
+                        "読み上げの有無に関係なく、「次へ」を押すまで同じカードを表示します。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = settings.flashManualAdvanceWhenShowBoth,
+                    onCheckedChange = {
+                        onChange(settings.copy(flashManualAdvanceWhenShowBoth = it))
+                    },
+                )
+            }
+        }
 
         Row(
             modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
@@ -2077,46 +2119,6 @@ private fun SettingsScreen(
                 listOf("1回" to 1, "2回" to 2, "3回" to 3),
                 settings.flashRepeatCount,
             ) { onChange(settings.copy(flashRepeatCount = it)) }
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("最初から問題と答えを両方表示", fontWeight = FontWeight.Bold)
-                    Text(
-                        "オンでは、読み上げ中も裏面を隠さず最初から表示します。",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = settings.flashShowBothInitially,
-                    onCheckedChange = { onChange(settings.copy(flashShowBothInitially = it)) },
-                )
-            }
-            if (settings.flashShowBothInitially) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("表裏同時表示時は自動送りしない", fontWeight = FontWeight.Bold)
-                        Text(
-                            "読み上げが終わっても停止し、「次へ」を押すまで同じカードを表示します。",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = settings.flashManualAdvanceWhenShowBoth,
-                        onCheckedChange = {
-                            onChange(settings.copy(flashManualAdvanceWhenShowBoth = it))
-                        },
-                    )
-                }
-            }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -2917,6 +2919,7 @@ private fun QuizScreen(
     val logs = remember { mutableStateListOf<AnswerLog>() }
     val focusManager = LocalFocusManager.current
     val hardwareKeyFocusRequester = remember { FocusRequester() }
+    val answerInputFocusRequester = remember { FocusRequester() }
     var answerInputFocused by remember { mutableStateOf(false) }
     val startedAt = remember { System.currentTimeMillis() }
 
@@ -3226,17 +3229,43 @@ private fun QuizScreen(
             .focusRequester(hardwareKeyFocusRequester)
             .focusable()
             .onPreviewKeyEvent { event ->
-                if (event.key != Key.Spacebar || answerInputFocused || showConfirm || showCardEditor) {
+                if (answerInputFocused || showConfirm || showCardEditor) {
                     false
-                } else {
-                    when (event.type) {
-                        KeyEventType.KeyDown -> true
-                        KeyEventType.KeyUp -> {
-                            if (phase == Phase.ASKING) passQuestion() else goNext()
-                            true
+                } else when {
+                    event.key == Key.Spacebar -> {
+                        when (event.type) {
+                            KeyEventType.KeyDown -> true
+                            KeyEventType.KeyUp -> {
+                                if (phase == Phase.ASKING) passQuestion() else goNext()
+                                true
+                            }
+                            else -> false
                         }
-                        else -> false
                     }
+                    event.key == Key.Enter -> {
+                        when (event.type) {
+                            KeyEventType.KeyDown -> true
+                            KeyEventType.KeyUp -> {
+                                when {
+                                    phase == Phase.ASKING && !reverse && input.isNotBlank() -> submitTypedAnswer()
+                                    phase == Phase.FEEDBACK && lastCorrect -> goNext()
+                                }
+                                true
+                            }
+                            else -> false
+                        }
+                    }
+                    phase == Phase.ASKING && !reverse && event.type == KeyEventType.KeyDown -> {
+                        val codePoint = event.nativeKeyEvent.unicodeChar
+                        if (codePoint > 0 && !Character.isISOControl(codePoint)) {
+                            // 最初の文字を入力欄へ届けるため、既定のキー処理は止めずにフォーカスだけ移す。
+                            answerInputFocusRequester.requestFocus()
+                            false
+                        } else {
+                            false
+                        }
+                    }
+                    else -> false
                 }
             },
     ) {
@@ -3533,6 +3562,7 @@ private fun QuizScreen(
                         onValueChange = { input = it },
                         modifier = Modifier
                             .weight(1f)
+                            .focusRequester(answerInputFocusRequester)
                             .onFocusChanged { answerInputFocused = it.isFocused },
                         placeholder = { Text("よみを ひらがなで入力") },
                         singleLine = true,
@@ -3717,7 +3747,7 @@ private fun FlashcardScreen(
     }
 
     fun handleSpaceKey() {
-        val answerVisible = !effectiveSpeech || showBothInitially || showingBack
+        val answerVisible = showBothInitially || showingBack
         if (answerVisible || awaitingManualNext) {
             goForward()
             return
@@ -3798,7 +3828,12 @@ private fun FlashcardScreen(
                 delay(50)
                 elapsed += 50f
             }
-            goForward()
+            if (!showBothInitially && !showingBack) {
+                showingBack = true
+                elapsed = 0f
+            } else {
+                goForward()
+            }
             return@LaunchedEffect
         }
         if (!ttsReady) return@LaunchedEffect
@@ -3987,7 +4022,7 @@ private fun FlashcardScreen(
                         textAlign = TextAlign.Center,
                     )
                 }
-                if (!effectiveSpeech || showBothInitially || showingBack) {
+                if (showBothInitially || showingBack) {
                     Spacer(Modifier.height(16.dp))
                     HorizontalDivider(modifier = Modifier.fillMaxWidth().padding(horizontal = 40.dp))
                     Spacer(Modifier.height(16.dp))

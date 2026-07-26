@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.kanjiquiz"
         minSdk = 26
         targetSdk = 34
-        versionCode = 25
-        versionName = "1.24"
+        versionCode = 27
+        versionName = "1.26"
     }
 
     buildTypes {

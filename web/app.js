@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.26";
+const APP_VERSION = "0.1.28";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -2364,24 +2364,50 @@ function renderQuiz() {
   document.getElementById("quit-quiz").addEventListener("click", () => showQuitQuizModal(session));
 
   session.keyHandler = event => {
-    if (event.code !== "Space" && event.key !== " ") return;
     if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
     if (document.getElementById("card-editor-overlay")) return;
     if (document.getElementById("quiz-modal")?.childElementCount) return;
 
     const target = event.target;
-    if (target instanceof HTMLElement &&
-        (target.matches("input, textarea, select, [contenteditable='true']") ||
-         target.closest("input, textarea, select, [contenteditable='true']"))) {
+    const editableTarget = target instanceof HTMLElement &&
+      (target.matches("input, textarea, select, [contenteditable='true']") ||
+       target.closest("input, textarea, select, [contenteditable='true']"));
+
+    // 入力欄内のキー操作は入力欄自身に任せる。Enterもここでは二重処理しない。
+    if (editableTarget) return;
+
+    if (event.code === "Space" || event.key === " ") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (session.phase === "ASKING") {
+        session.judge(false, "", true);
+      } else if (session.phase === "FEEDBACK") {
+        session.goNext();
+      }
       return;
     }
 
-    event.preventDefault();
-    event.stopPropagation();
-    if (session.phase === "ASKING") {
-      session.judge(false, "", true);
-    } else if (session.phase === "FEEDBACK") {
-      session.goNext();
+    if (event.key === "Enter") {
+      if (session.phase === "ASKING" && !session.config.reverse) {
+        const input = document.getElementById("answer-input");
+        if (!input || !input.value.trim()) return;
+        event.preventDefault();
+        event.stopPropagation();
+        submitCurrentTypedAnswer(session);
+      } else if (session.phase === "FEEDBACK" && session.lastCorrect) {
+        event.preventDefault();
+        event.stopPropagation();
+        session.goNext();
+      }
+      return;
+    }
+
+    // 物理キーボードで文字を打ち始めたら、最初の文字から回答欄へ送る。
+    // 日本語IMEも使えるよう、文字を手動挿入せずフォーカスだけ移して既定処理を継続する。
+    if (session.phase === "ASKING" && !session.config.reverse &&
+        event.key.length === 1 && event.key !== " ") {
+      const input = document.getElementById("answer-input");
+      if (input) input.focus({ preventScroll: true });
     }
   };
   document.addEventListener("keydown", session.keyHandler);
@@ -2466,6 +2492,16 @@ document.addEventListener("click", event => {
   }
 }, true);
 
+function submitCurrentTypedAnswer(session) {
+  if (!session || session.phase !== "ASKING" || session.config.reverse) return false;
+  const input = document.getElementById("answer-input");
+  if (!input) return false;
+  const normalized = normalizeKana(input.value);
+  if (!normalized) return false;
+  session.judge(session.item.accepted.includes(normalized), input.value);
+  return true;
+}
+
 function renderQuizQuestion(session) {
   if (state.screen !== "quiz" || session.ended) return;
   markCardSeen(session.item, session.config);
@@ -2497,11 +2533,7 @@ function renderQuizQuestion(session) {
       </div>
       <button class="btn btn-ghost" id="pass-question" type="button">パス →</button>`;
     const input = document.getElementById("answer-input");
-    const submit = () => {
-      const normalized = normalizeKana(input.value);
-      if (!normalized) return;
-      session.judge(session.item.accepted.includes(normalized), input.value);
-    };
+    const submit = () => submitCurrentTypedAnswer(session);
     bindImmediateQuizAction(document.getElementById("submit-answer"), submit);
     input.addEventListener("focus", () => {
       quizInputFocused = true;
@@ -3002,7 +3034,7 @@ function renderFlash() {
     event.preventDefault();
     event.stopPropagation();
 
-    const answerVisible = !flash.speechEnabled || flash.showBothInitially || flash.phase === "BACK";
+    const answerVisible = flash.showBothInitially || flash.phase === "BACK";
     if (answerVisible || flash.awaitingManualNext) {
       changeFlash(1);
       return;
@@ -3015,7 +3047,7 @@ function renderFlash() {
     flash.speaking = false;
     flash.awaitingManualNext = false;
     flash.phase = "BACK";
-    flash.remainingMs = flash.backWaitDeci * 100;
+    flash.remainingMs = (flash.speechEnabled ? flash.backWaitDeci : flash.secDeci) * 100;
     flash.lastTick = performance.now();
     renderFlashCardContent();
     if (!flash.paused) beginFlashPhase({ preserveWait: true });
@@ -3066,7 +3098,7 @@ function renderFlashCardContent() {
   const flash = state.flash;
   if (!flash) return;
   const item = flash.items[flash.index];
-  const revealBack = !flash.speechEnabled || flash.showBothInitially || flash.phase === "BACK";
+  const revealBack = flash.showBothInitially || flash.phase === "BACK";
   document.getElementById("flash-content").innerHTML = `
     <div class="stack">
       <div class="selectable flash-question">${textHtml(item.question)}</div>
@@ -3166,6 +3198,19 @@ function advanceFlashPhase() {
   const flash = state.flash;
   if (!flash) return;
   if (!flash.speechEnabled || !("speechSynthesis" in window)) {
+    if (!flash.showBothInitially && flash.phase === "FRONT") {
+      flash.phase = "BACK";
+      flash.remainingMs = flash.secDeci * 100;
+      flash.lastTick = performance.now();
+      renderFlashCardContent();
+      return;
+    }
+    if (flash.showBothInitially && flash.manualAdvanceWhenShowBoth) {
+      flash.awaitingManualNext = true;
+      flash.remainingMs = 0;
+      updateFlashUi();
+      return;
+    }
     changeFlash(1);
     return;
   }
@@ -3218,7 +3263,7 @@ function updateFlashUi() {
     ? "読み上げ完了・次へを押してください"
     : speechActive
       ? `${flash.phase === "FRONT" ? "表面" : "裏面"}・${flash.repeatIndex}/${flash.repeatCount}回${flash.speaking ? "・読み上げ中" : ""}`
-      : "";
+      : (flash.showBothInitially ? "問題・答え" : (flash.phase === "FRONT" ? "問題" : "答え"));
   const pauseButton = document.getElementById("flash-pause");
   pauseButton.textContent = flash.paused ? "再開" : "一時停止";
   pauseButton.disabled = flash.awaitingManualNext;
@@ -3250,8 +3295,17 @@ function renderSettings() {
           <label><span>既定の制限時間（秒）</span><input class="field" id="s-time" type="number" min="0" max="600" value="${settings.timeLimitSec}"></label>
           <label><span>最大挑戦回数</span><input class="field" id="s-attempts" type="number" min="1" max="99" value="${settings.maxAttempts}"></label>
           <label><span>正誤表示時間（秒）</span><input class="field" id="s-feedback" type="number" min="0.1" max="60" step="0.1" value="${settings.feedbackDeci / 10}"></label>
-          <label><span>めくり表示時間（読み上げOFF時・秒）</span><input class="field" id="s-flash" type="number" min="0.3" max="60" step="0.1" value="${settings.flashcardDeci / 10}"></label>
+          <label><span>めくり表示時間（読み上げOFF時・各面の秒数）</span><input class="field" id="s-flash" type="number" min="0.3" max="60" step="0.1" value="${settings.flashcardDeci / 10}"></label>
           <label><span>ゲーム画面の文字サイズ（16〜96px）</span><input class="field" id="s-font-size" type="number" min="16" max="96" value="${settings.gameFontSize}"></label>
+        </div>
+        <div class="card stack">
+          <strong>めくり表示</strong>
+          <label class="row"><input id="s-flash-show-both" type="checkbox" ${settings.flashShowBothInitially ? "checked" : ""}><span>最初から問題と答えを両方表示</span></label>
+          <div class="subtle small">読み上げのオン・オフに関係なく、めくり開始時の表示方法を切り替えます。</div>
+          <div id="flash-manual-advance-setting" ${settings.flashShowBothInitially ? "" : "hidden"}>
+            <label class="row"><input id="s-flash-manual-advance" type="checkbox" ${settings.flashManualAdvanceWhenShowBoth ? "checked" : ""}><span>表裏同時表示時は自動送りしない</span></label>
+            <div class="subtle small">読み上げの有無に関係なく、「次へ」を押すまで同じカードを表示します。</div>
+          </div>
         </div>
         <label class="row"><input id="s-flash-speech-enabled" type="checkbox" ${settings.flashSpeechEnabled ? "checked" : ""}><span>めくりモードで自動読み上げ</span></label>
         <div class="card stack" id="flash-speech-settings" ${settings.flashSpeechEnabled ? "" : "hidden"}>
@@ -3267,10 +3321,6 @@ function renderSettings() {
             <label><span>表面読み上げ後の待ち時間（秒）</span><input class="field" id="s-flash-front-wait" type="number" min="0" max="60" step="0.1" value="${settings.flashFrontWaitDeci / 10}"></label>
             <label><span>裏面読み上げ後の待ち時間（秒）</span><input class="field" id="s-flash-back-wait" type="number" min="0" max="60" step="0.1" value="${settings.flashBackWaitDeci / 10}"></label>
           </div>
-          <label class="row"><input id="s-flash-show-both" type="checkbox" ${settings.flashShowBothInitially ? "checked" : ""}><span>最初から問題と答えを両方表示</span></label>
-          <div class="subtle small">オンでは、読み上げ中も答えを隠さず最初から表示します。</div>
-          <label class="row"><input id="s-flash-manual-advance" type="checkbox" ${settings.flashManualAdvanceWhenShowBoth ? "checked" : ""}><span>表裏同時表示時は自動送りしない</span></label>
-          <div class="subtle small">読み上げが終わっても停止し、「次へ」を押すまで同じカードを表示します。</div>
           <label class="row"><input id="s-flash-read-parentheses" type="checkbox" ${settings.flashSpeechReadParentheses ? "checked" : ""}><span>括弧内の注釈も読む</span></label>
           <div class="subtle small">↑・↓・HTMLタグは読み上げ時だけ除外します。</div>
         </div>
@@ -3302,6 +3352,9 @@ function renderSettings() {
 
   document.getElementById("s-flash-speech-enabled").addEventListener("change", event => {
     document.getElementById("flash-speech-settings").hidden = !event.target.checked;
+  });
+  document.getElementById("s-flash-show-both").addEventListener("change", event => {
+    document.getElementById("flash-manual-advance-setting").hidden = !event.target.checked;
   });
 
   document.getElementById("save-settings").addEventListener("click", () => {
