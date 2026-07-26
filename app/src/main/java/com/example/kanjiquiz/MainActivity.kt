@@ -115,7 +115,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.26"
+private const val APP_VERSION = "1.27"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -3726,14 +3726,15 @@ private fun FlashcardScreen(
         }
     }
 
-    fun toCard(i: Int) {
+    fun toCard(i: Int, revealBack: Boolean = false) {
         tts.stop()
         index = i.coerceIn(0, items.lastIndex)
         elapsed = 0f
-        showingBack = false
+        showingBack = revealBack && !showBothInitially
         repeatIndex = 1
         awaitingManualNext = false
         completedUtteranceId = null
+        replayToken += 1
     }
 
     fun goForward() {
@@ -3745,18 +3746,45 @@ private fun FlashcardScreen(
         }
     }
 
-    fun handleSpaceKey() {
-        val answerVisible = showBothInitially || showingBack
-        if (answerVisible || awaitingManualNext) {
-            goForward()
-            return
-        }
+    fun revealCurrentAnswer() {
+        if (showBothInitially || showingBack) return
         tts.stop()
         completedUtteranceId = null
         replayToken += 1
         awaitingManualNext = false
         showingBack = true
         elapsed = 0f
+    }
+
+    fun hideCurrentAnswer() {
+        if (showBothInitially || !showingBack) return
+        tts.stop()
+        completedUtteranceId = null
+        replayToken += 1
+        awaitingManualNext = false
+        showingBack = false
+        repeatIndex = 1
+        elapsed = 0f
+    }
+
+    fun handleNextAction() {
+        if (!showBothInitially && !showingBack && !awaitingManualNext) {
+            revealCurrentAnswer()
+        } else {
+            goForward()
+        }
+    }
+
+    fun handlePreviousAction() {
+        if (!showBothInitially && showingBack) {
+            hideCurrentAnswer()
+        } else if (index > 0) {
+            toCard(index - 1, revealBack = !showBothInitially)
+        }
+    }
+
+    fun handleSpaceKey() {
+        handleNextAction()
     }
 
     fun speechText(raw: String): String {
@@ -4088,14 +4116,14 @@ private fun FlashcardScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             OutlinedButton(
-                onClick = { if (index > 0) toCard(index - 1) },
-                enabled = index > 0,
+                onClick = { handlePreviousAction() },
+                enabled = index > 0 || (!showBothInitially && showingBack),
             ) { Text("← 前") }
             TextButton(onClick = {
                 paused = !paused
                 if (paused) tts.stop()
             }) { Text(if (paused) "▶ 再開" else "⏸ 停止") }
-            OutlinedButton(onClick = { goForward() }) { Text("次 →") }
+            OutlinedButton(onClick = { handleNextAction() }) { Text("次 →") }
         }
         Spacer(Modifier.height(8.dp))
     }

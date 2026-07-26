@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.28";
+const APP_VERSION = "0.1.29";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -3007,8 +3007,8 @@ function renderFlash() {
   document.getElementById("finish-flash").addEventListener("click", () => {
     flash.stop(); state.flash = null; navigate("fields");
   });
-  document.getElementById("flash-prev").addEventListener("click", () => changeFlash(-1));
-  document.getElementById("flash-next").addEventListener("click", () => changeFlash(1));
+  document.getElementById("flash-prev").addEventListener("click", () => handleFlashPrevious());
+  document.getElementById("flash-next").addEventListener("click", () => handleFlashNext());
   document.getElementById("flash-pause").addEventListener("click", () => {
     flash.paused = !flash.paused;
     cancelFlashSpeech();
@@ -3034,23 +3034,7 @@ function renderFlash() {
     event.preventDefault();
     event.stopPropagation();
 
-    const answerVisible = flash.showBothInitially || flash.phase === "BACK";
-    if (answerVisible || flash.awaitingManualNext) {
-      changeFlash(1);
-      return;
-    }
-
-    cancelFlashSpeech();
-    if (flash.speechWatchdogId != null) clearTimeout(flash.speechWatchdogId);
-    flash.speechWatchdogId = null;
-    flash.speechToken += 1;
-    flash.speaking = false;
-    flash.awaitingManualNext = false;
-    flash.phase = "BACK";
-    flash.remainingMs = (flash.speechEnabled ? flash.backWaitDeci : flash.secDeci) * 100;
-    flash.lastTick = performance.now();
-    renderFlashCardContent();
-    if (!flash.paused) beginFlashPhase({ preserveWait: true });
+    handleFlashNext();
   };
   document.addEventListener("keydown", flash.keyHandler);
 
@@ -3236,6 +3220,75 @@ function advanceFlashPhase() {
     return;
   }
   changeFlash(1);
+}
+
+function stopCurrentFlashActivity() {
+  const flash = state.flash;
+  if (!flash) return;
+  cancelFlashSpeech();
+  if (flash.speechWatchdogId != null) clearTimeout(flash.speechWatchdogId);
+  flash.speechWatchdogId = null;
+  flash.speechToken += 1;
+  flash.speaking = false;
+  flash.awaitingManualNext = false;
+}
+
+function revealCurrentFlashAnswer() {
+  const flash = state.flash;
+  if (!flash || flash.showBothInitially || flash.phase === "BACK") return;
+  stopCurrentFlashActivity();
+  flash.phase = "BACK";
+  flash.remainingMs = (flash.speechEnabled ? flash.backWaitDeci : flash.secDeci) * 100;
+  flash.lastTick = performance.now();
+  renderFlashCardContent();
+  if (!flash.paused) beginFlashPhase({ preserveWait: true });
+}
+
+function hideCurrentFlashAnswer() {
+  const flash = state.flash;
+  if (!flash || flash.showBothInitially || flash.phase !== "BACK") return;
+  stopCurrentFlashActivity();
+  flash.phase = "FRONT";
+  flash.repeatIndex = 1;
+  flash.remainingMs = (flash.speechEnabled ? flash.frontWaitDeci : flash.secDeci) * 100;
+  flash.lastTick = performance.now();
+  renderFlashCardContent();
+  if (!flash.paused) beginFlashPhase({ preserveWait: true });
+}
+
+function moveFlashToPreviousWithAnswer() {
+  const flash = state.flash;
+  if (!flash || flash.index <= 0) return;
+  stopCurrentFlashActivity();
+  flash.index -= 1;
+  flash.phase = flash.showBothInitially ? "FRONT" : "BACK";
+  flash.repeatIndex = 1;
+  flash.remainingMs = (flash.speechEnabled
+    ? (flash.phase === "FRONT" ? flash.frontWaitDeci : flash.backWaitDeci)
+    : flash.secDeci) * 100;
+  flash.lastTick = performance.now();
+  renderFlashCardContent();
+  if (!flash.paused) beginFlashPhase({ preserveWait: true });
+}
+
+function handleFlashNext() {
+  const flash = state.flash;
+  if (!flash) return;
+  if (!flash.showBothInitially && flash.phase === "FRONT" && !flash.awaitingManualNext) {
+    revealCurrentFlashAnswer();
+    return;
+  }
+  changeFlash(1);
+}
+
+function handleFlashPrevious() {
+  const flash = state.flash;
+  if (!flash) return;
+  if (!flash.showBothInitially && flash.phase === "BACK") {
+    hideCurrentFlashAnswer();
+    return;
+  }
+  moveFlashToPreviousWithAnswer();
 }
 
 function changeFlash(delta) {
