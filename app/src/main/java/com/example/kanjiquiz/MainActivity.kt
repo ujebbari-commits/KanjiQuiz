@@ -115,7 +115,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.27"
+private const val APP_VERSION = "1.28"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -2026,7 +2026,7 @@ private fun SettingsScreen(
 
         HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
         ChipRow("めくりモード：問題・答えそれぞれの表示時間（読み上げOFF時）",
-            listOf("2秒" to 20, "3秒" to 30, "5秒" to 50, "8秒" to 80),
+            listOf("無制限" to 0, "2秒" to 20, "3秒" to 30, "5秒" to 50, "8秒" to 80),
             settings.flashcardDeci) { onChange(settings.copy(flashcardDeci = it)) }
 
         Row(
@@ -3697,7 +3697,7 @@ private fun FlashcardScreen(
     }
     BackHandler { stopAndDone() }
 
-    val perCardMillis = secDeci.coerceAtLeast(3) * 100L
+    val perCardMillis = secDeci.coerceAtLeast(0) * 100L
     var index by remember { mutableIntStateOf(0) }
     var elapsed by remember { mutableFloatStateOf(0f) }
     var paused by remember { mutableStateOf(false) }
@@ -3848,6 +3848,10 @@ private fun FlashcardScreen(
         if (!effectiveSpeech) {
             if (manualAdvanceActive) {
                 awaitingManualNext = true
+                elapsed = 0f
+                return@LaunchedEffect
+            }
+            if (secDeci <= 0) {
                 elapsed = 0f
                 return@LaunchedEffect
             }
@@ -4004,10 +4008,17 @@ private fun FlashcardScreen(
             }
         }
         Spacer(Modifier.height(8.dp))
-        if (!manualAdvanceActive) {
+        val untimedManualFlash = !effectiveSpeech && secDeci <= 0
+        if (!manualAdvanceActive && !untimedManualFlash) {
             LinearProgressIndicator(
                 progress = { progress },
                 modifier = Modifier.fillMaxWidth().height(6.dp),
+            )
+        } else if (untimedManualFlash) {
+            Text(
+                "時間制限なし・前へ／次へで操作します。",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else if (awaitingManualNext) {
             Text(
@@ -4024,7 +4035,7 @@ private fun FlashcardScreen(
             )
         } else if (speechEnabled && ttsFailed) {
             Text(
-                "日本語の読み上げを利用できないため、通常の自動めくりで再生しています。",
+                "日本語の読み上げを利用できないため、読み上げなしのめくりモードで表示しています。",
                 fontSize = 12.sp,
                 color = ComboOrange,
             )

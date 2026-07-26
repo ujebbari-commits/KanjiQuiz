@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.29";
+const APP_VERSION = "0.1.30";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -129,7 +129,7 @@ function loadSettings() {
     ...saved,
     maxAttempts: clampInt(saved.maxAttempts ?? DEFAULT_SETTINGS.maxAttempts, 1, 99),
     feedbackDeci: clampInt(saved.feedbackDeci ?? DEFAULT_SETTINGS.feedbackDeci, 1, 600),
-    flashcardDeci: clampInt(saved.flashcardDeci ?? DEFAULT_SETTINGS.flashcardDeci, 3, 600),
+    flashcardDeci: clampInt(saved.flashcardDeci ?? DEFAULT_SETTINGS.flashcardDeci, 0, 600),
     flashSpeechEnabled: Boolean(saved.flashSpeechEnabled),
     flashSpeechTarget: ["BOTH", "FRONT", "BACK"].includes(saved.flashSpeechTarget)
       ? saved.flashSpeechTarget
@@ -2977,7 +2977,7 @@ function renderFlash() {
       </div>
       <div id="flash-progress"></div>
       ${flash.speechRequested && !flash.speechEnabled
-        ? `<div class="error small">このブラウザーでは読み上げを利用できないため、通常の自動めくりで再生します。</div>`
+        ? `<div class="error small">このブラウザーでは読み上げを利用できないため、読み上げなしのめくりモードで表示します。</div>`
         : ""}
       <section class="flash-content" id="flash-content"></section>
       <button class="btn btn-ghost btn-wide" id="flash-edit-card" type="button">カードを編集</button>
@@ -3075,6 +3075,11 @@ function resetFlashCard() {
     updateFlashUi();
     return;
   }
+  if (!flash.speechEnabled && flash.secDeci <= 0) {
+    flash.remainingMs = 0;
+    updateFlashUi();
+    return;
+  }
   beginFlashPhase({ preserveWait: true });
 }
 
@@ -3112,6 +3117,7 @@ function beginFlashPhase({ preserveWait = false } = {}) {
 
   if (!flash.speechEnabled || !("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
     if (!preserveWait) flash.remainingMs = flash.secDeci * 100;
+    if (flash.secDeci <= 0) flash.remainingMs = 0;
     updateFlashUi();
     return;
   }
@@ -3162,7 +3168,8 @@ function beginFlashPhase({ preserveWait = false } = {}) {
 
 function tickFlash() {
   const flash = state.flash;
-  if (!flash || flash.paused || flash.awaitingManualNext || document.hidden) {
+  if (!flash || flash.paused || flash.awaitingManualNext ||
+      (!flash.speechEnabled && flash.secDeci <= 0) || document.hidden) {
     if (flash) flash.lastTick = performance.now();
     return;
   }
@@ -3326,7 +3333,11 @@ function updateFlashUi() {
     repeatButton.textContent = flash.phase === "FRONT" ? "表面をもう一度読む" : "裏面をもう一度読む";
   }
   const manualAdvance = flash.showBothInitially && flash.manualAdvanceWhenShowBoth;
-  if (manualAdvance) {
+  const untimedManualFlash = !speechActive && flash.secDeci <= 0;
+  if (untimedManualFlash) {
+    document.getElementById("flash-progress").innerHTML =
+      `<div class="subtle small">時間制限なし・前へ／次へで操作します。</div>`;
+  } else if (manualAdvance) {
     document.getElementById("flash-progress").innerHTML = flash.awaitingManualNext
       ? `<div class="subtle small">次へを押すまでこのカードを表示します。</div>`
       : "";
@@ -3348,7 +3359,7 @@ function renderSettings() {
           <label><span>既定の制限時間（秒）</span><input class="field" id="s-time" type="number" min="0" max="600" value="${settings.timeLimitSec}"></label>
           <label><span>最大挑戦回数</span><input class="field" id="s-attempts" type="number" min="1" max="99" value="${settings.maxAttempts}"></label>
           <label><span>正誤表示時間（秒）</span><input class="field" id="s-feedback" type="number" min="0.1" max="60" step="0.1" value="${settings.feedbackDeci / 10}"></label>
-          <label><span>めくり表示時間（読み上げOFF時・各面の秒数）</span><input class="field" id="s-flash" type="number" min="0.3" max="60" step="0.1" value="${settings.flashcardDeci / 10}"></label>
+          <label><span>めくり表示時間（読み上げOFF時・各面の秒数。0で無制限）</span><input class="field" id="s-flash" type="number" min="0" max="60" step="0.1" value="${settings.flashcardDeci / 10}"></label>
           <label><span>ゲーム画面の文字サイズ（16〜96px）</span><input class="field" id="s-font-size" type="number" min="16" max="96" value="${settings.gameFontSize}"></label>
         </div>
         <div class="card stack">
@@ -3417,7 +3428,7 @@ function renderSettings() {
       timeLimitSec: clampInt(document.getElementById("s-time").value, 0, 600),
       maxAttempts: clampInt(document.getElementById("s-attempts").value, 1, 99),
       feedbackDeci: clampInt(Math.round(Number(document.getElementById("s-feedback").value) * 10), 1, 600),
-      flashcardDeci: clampInt(Math.round(Number(document.getElementById("s-flash").value) * 10), 3, 600),
+      flashcardDeci: clampInt(Math.round(Number(document.getElementById("s-flash").value) * 10), 0, 600),
       flashSpeechEnabled: document.getElementById("s-flash-speech-enabled").checked,
       flashSpeechTarget: document.getElementById("s-flash-speech-target").value,
       flashSpeechRate: Math.min(2, Math.max(0.5, Number(document.getElementById("s-flash-speech-rate").value) || 1)),
