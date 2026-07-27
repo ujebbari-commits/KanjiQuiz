@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.30";
+const APP_VERSION = "0.1.31";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 1;
 const STORE_DECKS = "decks";
@@ -2068,6 +2068,8 @@ class QuizSession {
     this.lastCorrect = false;
     this.lastWasManualPass = false;
     this.lastGained = 0;
+    this.lastSpeedBonus = 0;
+    this.lastComboBonus = 0;
     this.lastTimeBonus = 0;
     this.score = 0;
     this.combo = 0;
@@ -2177,6 +2179,8 @@ class QuizSession {
     this.retryNotice = "";
     this.lastWasManualPass = false;
     this.remaining = this.config.timeLimitSec;
+    this.lastSpeedBonus = 0;
+    this.lastComboBonus = 0;
     this.lastTimeBonus = 0;
     this.phase = "ASKING";
     this.feedbackDeadline = null;
@@ -2190,6 +2194,8 @@ class QuizSession {
     this.questionSerial += 1;
     // 同じ1問への再挑戦なので、残り時間は引き継ぐ。
     this.lastGained = 0;
+    this.lastSpeedBonus = 0;
+    this.lastComboBonus = 0;
     this.lastTimeBonus = 0;
     this.phase = "ASKING";
     renderQuizQuestion(this);
@@ -2231,7 +2237,9 @@ class QuizSession {
       const speed = this.perQuestionTimer && this.config.timeLimitSec > 0
         ? Math.round((this.remaining / this.config.timeLimitSec) * 50)
         : 0;
-      this.lastGained = 50 + speed + (this.combo - 1) * 5;
+      this.lastSpeedBonus = speed;
+      this.lastComboBonus = (this.combo - 1) * 5;
+      this.lastGained = 50 + this.lastSpeedBonus + this.lastComboBonus;
       this.score += this.lastGained;
       if (this.config.threeCorrectKey || Object.keys(this.config.threeCorrectKeyByCard || {}).length) {
         this.setThreeCorrectCount(this.item, this.getThreeCorrectCount(this.item) + 1);
@@ -2244,6 +2252,8 @@ class QuizSession {
     } else {
       this.combo = 0;
       this.lastGained = 0;
+      this.lastSpeedBonus = 0;
+      this.lastComboBonus = 0;
       this.lastTimeBonus = 0;
       if (this.isSurvival) this.lives -= 1;
       if (this.config.threeCorrectKey || Object.keys(this.config.threeCorrectKeyByCard || {}).length) {
@@ -2253,6 +2263,7 @@ class QuizSession {
     this.lastCorrect = correct;
     this.logs.push({ item: this.item, correct, input: recorded });
     this.phase = "FEEDBACK";
+    if (navigator.vibrate) navigator.vibrate(correct ? 35 : [55, 35, 55]);
     this.feedbackDeadline = manualPass ? null : performance.now() + this.config.feedbackDeci * 100;
     renderQuizFeedback(this);
   }
@@ -2334,6 +2345,10 @@ function renderQuiz() {
           <div id="selection-pause" class="subtle small"></div>
         </div>
         <div class="row row-wrap font-controls">
+          <div class="level-box">
+            <span id="quiz-level" class="level-label"></span>
+            <div class="level-track"><div id="quiz-level-fill"></div></div>
+          </div>
           <span id="quiz-score" class="score"></span>
           <button class="btn btn-ghost font-step" id="font-smaller" type="button" aria-label="文字を小さく">A−</button>
           <span id="font-size-label" class="small">${session.config.gameFontSize}px</span>
@@ -2511,6 +2526,7 @@ function renderQuizQuestion(session) {
   updateQuizHeaderUi(session);
   const main = document.getElementById("quiz-main");
   const controls = document.getElementById("quiz-controls");
+  main.className = `prompt-area quiz-arena asking${session.combo >= 5 ? " combo-active" : ""}`;
   main.innerHTML = `
     <div class="selectable prompt-text" id="selectable-prompt">${textHtml(session.promptText)}</div>
     <button class="btn btn-ghost card-edit-button" id="edit-current-card" type="button">編集</button>`;
@@ -2587,6 +2603,22 @@ function installSelectionPause(session) {
   if (label) label.textContent = "";
 }
 
+function quizFeedbackGrade(session, log) {
+  if (!session.lastCorrect) return session.lastWasManualPass ? "PASS" : "MISS";
+  if (session.attemptNumber > 1) return "CLEAR";
+  if (session.perQuestionTimer && session.config.timeLimitSec > 0 &&
+      session.remaining / session.config.timeLimitSec >= 0.7) return "PERFECT!";
+  if (session.combo >= 5) return "GREAT!";
+  return "NICE!";
+}
+
+function quizComboMilestone(session) {
+  if (!session.lastCorrect || session.combo < 5 || session.combo % 5 !== 0) return "";
+  if (session.combo >= 20 && session.combo % 10 === 0) return "LEGEND COMBO";
+  if (session.combo >= 10) return "FEVER COMBO";
+  return "COMBO UP";
+}
+
 function renderQuizFeedback(session) {
   if (state.screen !== "quiz" || session.ended) return;
   quizInputFocused = false;
@@ -2594,9 +2626,15 @@ function renderQuizFeedback(session) {
   updateQuizHeaderUi(session);
   const log = session.logs.at(-1);
   const title = session.lastCorrect ? "⭕ 正解！" : log.input ? "❌ 不正解" : "⏰ 時間切れ・パス";
+  const grade = quizFeedbackGrade(session, log);
+  const milestone = quizComboMilestone(session);
   const currentThree = session.getThreeCorrectCount(session.item);
-  document.getElementById("quiz-main").innerHTML = `
+  const main = document.getElementById("quiz-main");
+  main.className = `prompt-area quiz-arena ${session.lastCorrect ? "feedback-correct" : "feedback-wrong"}`;
+  main.innerHTML = `
     <div class="feedback">
+      <div class="game-grade ${session.lastCorrect ? "correct" : "wrong"}">${grade}</div>
+      ${milestone ? `<div class="combo-burst">${milestone}</div>` : ""}
       <div class="feedback-title ${session.lastCorrect ? "correct" : "wrong"}">${title}</div>
       <div class="selectable feedback-question">${textHtml(session.promptText)}</div>
       <div class="selectable feedback-answer">${textHtml(session.answerText)}</div>
@@ -2607,7 +2645,7 @@ function renderQuizFeedback(session) {
           ? (session.config.sharedThreeCorrectAllModes ? "成功3回：全モードから除外されます" : "累積3回正解：以後は出題されません")
           : `このカードの成功回数 ${currentThree}/${THREE_CORRECT_TARGET}`}
       </div>` : ""}
-      ${session.lastCorrect ? `<div class="correct"><strong>+${session.lastGained}</strong></div>` : ""}
+      ${session.lastCorrect ? `<div class="score-pop correct"><strong>+${session.lastGained}</strong><span>基本50 ＋ スピード${session.lastSpeedBonus} ＋ コンボ${session.lastComboBonus}</span></div>` : ""}
       ${session.isTimeAttack && session.lastTimeBonus > 0 ? `<div class="combo">⏱ +${session.lastTimeBonus}秒${session.lastTimeBonus >= 3 ? "（5コンボボーナス）" : ""}</div>` : ""}
     </div>`;
 
@@ -2642,6 +2680,8 @@ function updateQuizHeaderUi(session) {
   const attempt = document.getElementById("quiz-attempt");
   const retry = document.getElementById("quiz-retry");
   const score = document.getElementById("quiz-score");
+  const level = document.getElementById("quiz-level");
+  const levelFill = document.getElementById("quiz-level-fill");
   if (!status) return;
   if (session.isDailyTime || session.isDailyCount) {
     status.textContent = `デイリー・回答 ${session.logs.length}問`;
@@ -2660,6 +2700,9 @@ function updateQuizHeaderUi(session) {
     ? `挑戦 ${session.attemptNumber} / ${session.config.maxAttempts}` : "";
   retry.textContent = session.retryNotice;
   score.textContent = `SCORE ${session.score}`;
+  const sessionLevel = Math.floor(session.score / 500) + 1;
+  if (level) level.textContent = `LV ${sessionLevel}`;
+  if (levelFill) levelFill.style.width = `${((session.score % 500) / 500) * 100}%`;
 }
 
 function updateQuizTimerUi(session) {
@@ -2809,6 +2852,12 @@ function renderResult() {
   const correct = result.logs.filter(log => log.correct).length;
   const total = result.logs.length;
   const accuracy = total ? Math.round((correct / total) * 100) : 0;
+  const stars = accuracy === 100 ? 3 : accuracy >= 80 ? 2 : accuracy >= 60 ? 1 : 0;
+  const resultTitle = accuracy === 100 && result.maxCombo >= 10 ? "完全制覇"
+    : accuracy === 100 ? "パーフェクト"
+    : accuracy >= 80 ? "ナイスラン"
+    : accuracy >= 60 ? "クリア"
+    : "再挑戦";
   const missed = uniqueBy(result.logs.filter(log => !log.correct).map(log => log.item), item => itemIdentity(item, result.config));
   const missedDetails = result.logs.filter(log => !log.correct).map(log => `
     <div class="missed-item">
@@ -2821,6 +2870,8 @@ function renderResult() {
     <div class="stack">
       <div class="card stack center">
         <strong>${escapeHtml(GAME_MODES[result.config.gameMode])}</strong>
+        <div class="result-title">${resultTitle}</div>
+        <div class="result-stars">${"★".repeat(stars)}${"☆".repeat(3 - stars)}</div>
         <div class="metric-grid">
           <div class="metric"><span>正答率</span><strong>${accuracy}%</strong></div>
           <div class="metric"><span>スコア</span><strong>${result.score}</strong></div>

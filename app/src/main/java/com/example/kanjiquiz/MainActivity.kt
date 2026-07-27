@@ -10,13 +10,17 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.view.HapticFeedbackConstants
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -68,6 +72,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -115,7 +120,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.28"
+private const val APP_VERSION = "1.29"
 private const val THREE_CORRECT_TARGET = 3
 
 // ============================================================
@@ -2865,6 +2870,7 @@ private fun QuizScreen(
     onQuit: () -> Unit,
 ) {
     val context = LocalContext.current
+    val view = LocalView.current
     val baseItems = config.items
     val reverse = config.reverse
     val isTimeAttack = config.gameMode == GameMode.TIME_ATTACK
@@ -2906,6 +2912,8 @@ private fun QuizScreen(
     var lastCorrect by remember { mutableStateOf(false) }
     var lastWasManualPass by remember { mutableStateOf(false) }
     var lastGained by remember { mutableIntStateOf(0) }
+    var lastSpeedBonus by remember { mutableIntStateOf(0) }
+    var lastComboBonus by remember { mutableIntStateOf(0) }
     var lastTimeBonus by remember { mutableIntStateOf(0) }
     var score by remember { mutableIntStateOf(0) }
     var combo by remember { mutableIntStateOf(0) }
@@ -2967,6 +2975,8 @@ private fun QuizScreen(
         input = ""
         lastWasManualPass = false
         remaining = limit
+        lastSpeedBonus = 0
+        lastComboBonus = 0
         lastTimeBonus = 0
         phase = Phase.ASKING
     }
@@ -2979,6 +2989,8 @@ private fun QuizScreen(
         input = ""
         // 同じ1問への再挑戦なので、残り時間は引き継ぐ。
         lastGained = 0
+        lastSpeedBonus = 0
+        lastComboBonus = 0
         lastTimeBonus = 0
         phase = Phase.ASKING
     }
@@ -3101,7 +3113,9 @@ private fun QuizScreen(
             } else {
                 0
             }
-            lastGained = 50 + speed + (combo - 1) * 5
+            lastSpeedBonus = speed
+            lastComboBonus = (combo - 1) * 5
+            lastGained = 50 + lastSpeedBonus + lastComboBonus
             score += lastGained
             if (tracksThreeCorrectProgress) {
                 val current = threeCorrectCounts[item.noteId] ?: 0
@@ -3117,6 +3131,8 @@ private fun QuizScreen(
         } else {
             combo = 0
             lastGained = 0
+            lastSpeedBonus = 0
+            lastComboBonus = 0
             lastTimeBonus = 0
             if (isSurvival) lives -= 1
             if (tracksThreeCorrectProgress) {
@@ -3129,6 +3145,12 @@ private fun QuizScreen(
         lastCorrect = correct
         logs.add(AnswerLog(item, correct, recorded))
         phase = Phase.FEEDBACK
+        runCatching {
+            view.performHapticFeedback(
+                if (correct) HapticFeedbackConstants.VIRTUAL_KEY
+                else HapticFeedbackConstants.LONG_PRESS
+            )
+        }
     }
 
     fun submitTypedAnswer() {
@@ -3202,6 +3224,28 @@ private fun QuizScreen(
                 TextButton(onClick = { showConfirm = false }) { Text("続ける") }
             },
         )
+    }
+
+    val sessionLevel = score / 500 + 1
+    val levelProgress = (score % 500) / 500f
+    val feedbackScale by animateFloatAsState(
+        targetValue = if (phase == Phase.FEEDBACK) 1f else 0.985f,
+        animationSpec = tween(durationMillis = 180),
+        label = "quizFeedbackScale",
+    )
+    val feedbackGrade = when {
+        !lastCorrect && lastWasManualPass -> "PASS"
+        !lastCorrect -> "MISS"
+        attemptNumber > 1 -> "CLEAR"
+        perQuestionTimer && limit > 0f && remaining / limit >= 0.7f -> "PERFECT!"
+        combo >= 5 -> "GREAT!"
+        else -> "NICE!"
+    }
+    val comboMilestone = when {
+        lastCorrect && combo >= 20 && combo % 10 == 0 -> "LEGEND COMBO"
+        lastCorrect && combo >= 10 && combo % 5 == 0 -> "FEVER COMBO"
+        lastCorrect && combo >= 5 && combo % 5 == 0 -> "COMBO UP"
+        else -> null
     }
 
     if (showCardEditor) {
@@ -3303,7 +3347,14 @@ private fun QuizScreen(
                 )
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("SCORE $score", fontWeight = FontWeight.Bold)
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("LV $sessionLevel　SCORE $score", fontWeight = FontWeight.Bold)
+                    LinearProgressIndicator(
+                        progress = { levelProgress.coerceIn(0f, 1f) },
+                        modifier = Modifier.width(118.dp).height(5.dp),
+                        color = ComboOrange,
+                    )
+                }
                 TextButton(onClick = { showConfirm = true }) { Text("やめる") }
             }
         }
@@ -3410,13 +3461,35 @@ private fun QuizScreen(
             )
         }
 
-        Box(
+        Surface(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .then(if (keyboardVisible) Modifier.verticalScroll(questionScrollState) else Modifier),
-            contentAlignment = Alignment.Center,
+                .scale(feedbackScale)
+                .border(
+                    width = 2.dp,
+                    color = when {
+                        phase == Phase.FEEDBACK && lastCorrect -> CorrectGreen.copy(alpha = 0.75f)
+                        phase == Phase.FEEDBACK -> WrongRed.copy(alpha = 0.75f)
+                        combo >= 5 -> ComboOrange.copy(alpha = 0.55f)
+                        else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.30f)
+                    },
+                    shape = RoundedCornerShape(24.dp),
+                ),
+            shape = RoundedCornerShape(24.dp),
+            color = when {
+                phase == Phase.FEEDBACK && lastCorrect -> CorrectGreen.copy(alpha = 0.09f)
+                phase == Phase.FEEDBACK -> WrongRed.copy(alpha = 0.09f)
+                else -> MaterialTheme.colorScheme.surface.copy(alpha = 0.55f)
+            },
         ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+                    .then(if (keyboardVisible) Modifier.verticalScroll(questionScrollState) else Modifier),
+                contentAlignment = Alignment.Center,
+            ) {
             if (phase == Phase.ASKING) {
                 SelectionContainer {
                     Text(
@@ -3433,6 +3506,20 @@ private fun QuizScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                 ) {
+                    Text(
+                        feedbackGrade,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Black,
+                        color = if (lastCorrect) ComboOrange else WrongRed,
+                    )
+                    comboMilestone?.let { milestone ->
+                        Text(
+                            milestone,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Black,
+                            color = ComboOrange,
+                        )
+                    }
                     Text(
                         when {
                             lastCorrect -> "⭕ 正解！"
@@ -3499,9 +3586,14 @@ private fun QuizScreen(
                         Spacer(Modifier.height(6.dp))
                         Text(
                             "+$lastGained",
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold,
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Black,
                             color = CorrectGreen,
+                        )
+                        Text(
+                            "基本50 ＋ スピード$lastSpeedBonus ＋ コンボ$lastComboBonus",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         if (isTimeAttack && lastTimeBonus > 0) {
                             val bonusLabel = if (lastTimeBonus >= 3) {
@@ -3519,6 +3611,7 @@ private fun QuizScreen(
                     }
                 }
             }
+        }
         }
 
         OutlinedButton(
@@ -4175,12 +4268,32 @@ private fun ResultScreen(
     }
     val missed = logs.filter { !it.correct }.distinctBy { it.item.noteId }
 
+    val stars = when {
+        rate == 100 -> 3
+        rate >= 80 -> 2
+        rate >= 60 -> 1
+        else -> 0
+    }
+    val resultTitle = when {
+        rate == 100 && maxCombo >= 10 -> "完全制覇"
+        rate == 100 -> "パーフェクト"
+        rate >= 80 -> "ナイスラン"
+        rate >= 60 -> "クリア"
+        else -> "再挑戦"
+    }
+
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Spacer(Modifier.height(12.dp))
         Text(gameModeLabel(gameMode), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Text(resultTitle, fontSize = 26.sp, fontWeight = FontWeight.Black, color = ComboOrange)
+        Text(
+            "★".repeat(stars) + "☆".repeat(3 - stars),
+            fontSize = 34.sp,
+            color = ComboOrange,
+        )
         Text(rank, fontSize = 88.sp, fontWeight = FontWeight.Bold, color = rankColor)
         Text("SCORE $score", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text(
