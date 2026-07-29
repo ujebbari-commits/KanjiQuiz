@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.database.sqlite.SQLiteDatabase
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -120,8 +121,213 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.29"
+private const val APP_VERSION = "1.30"
 private const val THREE_CORRECT_TARGET = 3
+
+private data class PitchImportResult(val count: Int, val files: Int)
+
+private data class PitchIndex(
+    val entries: Map<String, String>,
+    val maxTermLength: Int,
+) {
+    fun annotate(raw: String): String {
+        val text = cleanText(raw)
+        if (text.isBlank() || entries.isEmpty()) return text
+        return text.lines().joinToString("\n") { line ->
+            if (line.any { it == '↑' || it == '↓' }) return@joinToString line
+            val output = StringBuilder()
+            var index = 0
+            while (index < line.length) {
+                val current = line[index]
+                if (!isJapanesePitchChar(current)) {
+                    output.append(current)
+                    index++
+                    continue
+                }
+                var matched: String? = null
+                var arrows: String? = null
+                val maxLength = minOf(maxTermLength, line.length - index)
+                for (length in maxLength downTo 1) {
+                    val candidate = line.substring(index, index + length)
+                    if (!candidate.all(::isJapanesePitchChar)) continue
+                    if (length == 1) {
+                        val leftJoined = index > 0 && isJapanesePitchChar(line[index - 1])
+                        val rightJoined = index + 1 < line.length && isJapanesePitchChar(line[index + 1])
+                        if (leftJoined || rightJoined) continue
+                    }
+                    val value = entries[candidate] ?: continue
+                    matched = candidate
+                    arrows = value
+                    break
+                }
+                if (matched == null || arrows == null) {
+                    output.append(current)
+                    index++
+                    continue
+                }
+                if (matched.all(::isKanaPitchChar)) output.append(arrows)
+                else output.append(matched).append('（').append(arrows).append('）')
+                index += matched.length
+            }
+            output.toString()
+        }
+    }
+}
+
+private fun isKanaPitchChar(ch: Char): Boolean =
+    ch in 'ぁ'..'ゖ' || ch in 'ァ'..'ヺ' || ch == 'ー'
+
+private fun isJapanesePitchChar(ch: Char): Boolean =
+    isKanaPitchChar(ch) || ch == '々' || ch == '〆' || ch == 'ヶ' ||
+        ch in '㐀'..'䶿' || ch in '一'..'鿿' || ch in '豈'..'﫿'
+
+private object NhkPitchDictionary {
+    private const val DATABASE_NAME = "nhk_pitch.db"
+    private var cache: PitchIndex? = null
+    private val smallKana = setOf('ゃ','ゅ','ょ','ぁ','ぃ','ぅ','ぇ','ぉ','ゎ','ャ','ュ','ョ','ァ','ィ','ゥ','ェ','ォ','ヮ')
+
+    private fun database(context: Context): SQLiteDatabase =
+        context.openOrCreateDatabase(DATABASE_NAME, Context.MODE_PRIVATE, null).apply {
+            execSQL("CREATE TABLE IF NOT EXISTS pitch(term TEXT PRIMARY KEY, arrows TEXT NOT NULL)")
+        }
+
+    fun count(context: Context): Int = runCatching {
+        database(context).rawQuery("SELECT COUNT(*) FROM pitch", null).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+    }.getOrDefault(0)
+
+    fun clear(context: Context) {
+        database(context).delete("pitch", null, null)
+        cache = null
+    }
+
+    fun load(context: Context): PitchIndex? {
+        cache?.let { return it }
+        val map = linkedMapOf<String, String>()
+        database(context).rawQuery("SELECT term, arrows FROM pitch", null).use { cursor ->
+            while (cursor.moveToNext()) {
+                val term = cursor.getString(0) ?: continue
+                val arrows = cursor.getString(1) ?: continue
+                if (term.isNotBlank() && arrows.isNotBlank()) map[term] = arrows
+            }
+        }
+        if (map.isEmpty()) return null
+        return PitchIndex(map, map.keys.maxOfOrNull { it.length } ?: 0).also { cache = it }
+    }
+
+    fun import(context: Context, uris: List<Uri>): PitchImportResult {
+        require(uris.isNotEmpty()) { "辞書ファイルが選択されていません。" }
+        val db = database(context)
+        var parsedFiles = 0
+        var importedCount = 0
+        db.beginTransaction()
+        try {
+            db.execSQL("DROP TABLE IF EXISTS pitch_import")
+            db.execSQL("CREATE TEMP TABLE pitch_import(term TEXT PRIMARY KEY, arrows TEXT NOT NULL)")
+            val statement = db.compileStatement("INSERT OR IGNORE INTO pitch_import(term, arrows) VALUES(?, ?)")
+            uris.forEach { uri ->
+                val raw = context.contentResolver.openInputStream(uri)
+                    ?.bufferedReader(Charsets.UTF_8)
+                    ?.use { it.readText() }
+                    ?: return@forEach
+                if (raw.isBlank()) return@forEach
+                val data = runCatching { JSONArray(raw) }.getOrNull() ?: return@forEach
+                parsedFiles++
+                for (index in 0 until data.length()) {
+                    val row = data.optJSONArray(index) ?: continue
+                    val term = cleanText(row.optString(0))
+                    if (term.isBlank()) continue
+                    var reading = cleanText(row.optString(1)).ifBlank { term }
+                    val positions = mutableListOf<Int>()
+                    collectPositions(row, positions)
+                    val position = positions.distinct().firstOrNull { it >= 0 } ?: continue
+                    reading = findReading(row).ifBlank { reading }
+                    val arrows = positionToArrows(reading, position)
+                    if (arrows.isBlank()) continue
+                    insertFirst(statement, term, arrows)
+                    if (reading.isNotBlank()) insertFirst(statement, reading, arrows)
+                }
+            }
+            importedCount = db.rawQuery("SELECT COUNT(*) FROM pitch_import", null).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getInt(0) else 0
+            }
+            require(importedCount > 0) { "ピッチ位置を含む辞書項目が見つかりませんでした。" }
+            db.delete("pitch", null, null)
+            db.execSQL("INSERT INTO pitch(term, arrows) SELECT term, arrows FROM pitch_import")
+            db.execSQL("DROP TABLE pitch_import")
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        cache = null
+        return PitchImportResult(importedCount, parsedFiles)
+    }
+
+    private fun insertFirst(statement: android.database.sqlite.SQLiteStatement, term: String, arrows: String) {
+        statement.clearBindings()
+        statement.bindString(1, term)
+        statement.bindString(2, arrows)
+        statement.executeInsert()
+    }
+
+    private fun collectPositions(node: Any?, output: MutableList<Int>) {
+        when (node) {
+            is JSONArray -> for (i in 0 until node.length()) collectPositions(node.opt(i), output)
+            is JSONObject -> {
+                val data = node.optJSONObject("data")
+                if (data?.optString("pitchPosition") == "true") {
+                    Regex("\\[(\\d+)]").find(node.optString("content"))?.groupValues?.getOrNull(1)
+                        ?.toIntOrNull()?.let(output::add)
+                }
+                val pitches = node.optJSONArray("pitches")
+                if (pitches != null) {
+                    for (i in 0 until pitches.length()) {
+                        val position = pitches.optJSONObject(i)?.optInt("position", -1) ?: -1
+                        if (position >= 0) output += position
+                    }
+                }
+                val keys = node.keys()
+                while (keys.hasNext()) collectPositions(node.opt(keys.next()), output)
+            }
+        }
+    }
+
+    private fun findReading(node: Any?): String = when (node) {
+        is JSONArray -> (0 until node.length()).asSequence()
+            .map { findReading(node.opt(it)) }.firstOrNull { it.isNotBlank() }.orEmpty()
+        is JSONObject -> {
+            node.optString("reading").takeIf { it.isNotBlank() } ?: run {
+                val keys = node.keys()
+                var found = ""
+                while (keys.hasNext() && found.isBlank()) found = findReading(node.opt(keys.next()))
+                found
+            }
+        }
+        else -> ""
+    }
+
+    private fun splitMoras(kana: String): List<String> {
+        val result = mutableListOf<String>()
+        kana.forEach { ch ->
+            if (ch in smallKana && result.isNotEmpty()) result[result.lastIndex] = result.last() + ch
+            else result += ch.toString()
+        }
+        return result
+    }
+
+    private fun positionToArrows(kana: String, position: Int): String {
+        val moras = splitMoras(kana)
+        if (moras.isEmpty()) return kana
+        return when {
+            position == 0 -> if (moras.size == 1) moras[0] else moras[0] + "↑" + moras.drop(1).joinToString("")
+            position == 1 -> moras[0] + "↓" + moras.drop(1).joinToString("")
+            position in 2..moras.size -> moras[0] + "↑" + moras.subList(1, position).joinToString("") +
+                "↓" + moras.drop(position).joinToString("")
+            else -> kana
+        }
+    }
+}
 
 // ============================================================
 //  設定（端末に保存）
@@ -154,6 +360,7 @@ data class Settings(
     val gameFontSizeSp: Int = 44,
     val sharedThreeCorrectAllModes: Boolean = false,
     val newOnly: Boolean = false,
+    val nhkPitchEnabled: Boolean = false,
 )
 
 data class DailyChallengeSettings(
@@ -245,6 +452,7 @@ class Store(context: Context) {
         gameFontSizeSp = sp.getInt("gameFontSizeSp", 44).coerceIn(16, 96),
         sharedThreeCorrectAllModes = sp.getBoolean("sharedThreeCorrectAllModes", false),
         newOnly = sp.getBoolean("newOnly", false),
+        nhkPitchEnabled = sp.getBoolean("nhkPitchEnabled", false),
     )
 
     fun saveSettings(s: Settings) {
@@ -271,6 +479,7 @@ class Store(context: Context) {
             .putInt("gameFontSizeSp", s.gameFontSizeSp.coerceIn(16, 96))
             .putBoolean("sharedThreeCorrectAllModes", s.sharedThreeCorrectAllModes)
             .putBoolean("newOnly", s.newOnly)
+            .putBoolean("nhkPitchEnabled", s.nhkPitchEnabled)
             .apply()
     }
 
@@ -840,6 +1049,37 @@ private fun App() {
     }
 
     var settings by remember { mutableStateOf(store.loadSettings()) }
+    var pitchImportMessage by remember { mutableStateOf<String?>(null) }
+    var pitchDictionaryCount by remember { mutableIntStateOf(NhkPitchDictionary.count(context)) }
+    var pitchRevision by remember { mutableIntStateOf(0) }
+    var pitchIndex by remember { mutableStateOf<PitchIndex?>(null) }
+    val pitchDictionaryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        pitchImportMessage = "NHK辞書を解析中…"
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) { NhkPitchDictionary.import(context, uris) }
+            }.onSuccess { result ->
+                pitchDictionaryCount = result.count
+                pitchRevision++
+                settings = settings.copy(nhkPitchEnabled = true)
+                store.saveSettings(settings)
+                pitchImportMessage = "取込完了：${result.count}語（${result.files}ファイル）"
+            }.onFailure {
+                pitchImportMessage = "取込失敗：${it.message}"
+            }
+        }
+    }
+    LaunchedEffect(settings.nhkPitchEnabled, pitchRevision) {
+        pitchIndex = if (settings.nhkPitchEnabled) {
+            withContext(Dispatchers.IO) { NhkPitchDictionary.load(context) }
+        } else {
+            null
+        }
+    }
+
     var dailySettings by remember { mutableStateOf(store.loadDailyChallengeSettings()) }
     var dailyHomeMessage by remember { mutableStateOf<String?>(null) }
     var stage by remember { mutableStateOf(Stage.DECKS) }
@@ -1316,7 +1556,20 @@ private fun App() {
 
         Stage.SETTINGS -> SettingsScreen(
             settings = settings,
+            pitchDictionaryCount = pitchDictionaryCount,
+            pitchImportMessage = pitchImportMessage,
             onChange = { settings = it; store.saveSettings(it) },
+            onImportPitchDictionary = {
+                pitchDictionaryLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+            },
+            onClearPitchDictionary = {
+                NhkPitchDictionary.clear(context)
+                pitchDictionaryCount = 0
+                pitchRevision++
+                settings = settings.copy(nhkPitchEnabled = false)
+                store.saveSettings(settings)
+                pitchImportMessage = "取り込んだNHK辞書を削除しました。"
+            },
             onResetThreeCorrectAll = { store.clearAllThreeCorrectProgress() },
             onBack = { stage = Stage.DECKS },
         )
@@ -1530,6 +1783,7 @@ private fun App() {
                     store.clearCardEdit(item.sourceDeckName, item.noteId)
                     applyFieldsToQuizItem(item, item.originalFields)
                 },
+                pitchIndex = pitchIndex,
                 onFinish = { result -> recordAndFinish(result, currentConfig) },
                 onQuit = { stage = Stage.DECKS },
             )
@@ -1548,6 +1802,7 @@ private fun App() {
                 readParentheses = settings.flashSpeechReadParentheses,
                 showBothInitially = settings.flashShowBothInitially,
                 manualAdvanceWhenShowBoth = settings.flashManualAdvanceWhenShowBoth,
+                pitchIndex = pitchIndex,
                 initialFontSizeSp = settings.gameFontSizeSp,
                 onGameFontSizeChanged = { size ->
                     settings = settings.copy(gameFontSizeSp = size)
@@ -1969,7 +2224,11 @@ private fun EdgeReaderCountField(value: Int, onChange: (Int) -> Unit) {
 @Composable
 private fun SettingsScreen(
     settings: Settings,
+    pitchDictionaryCount: Int,
+    pitchImportMessage: String?,
     onChange: (Settings) -> Unit,
+    onImportPitchDictionary: () -> Unit,
+    onClearPitchDictionary: () -> Unit,
     onResetThreeCorrectAll: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -2140,6 +2399,44 @@ private fun SettingsScreen(
                     checked = settings.flashSpeechReadParentheses,
                     onCheckedChange = { onChange(settings.copy(flashSpeechReadParentheses = it)) },
                 )
+            }
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+        Text("NHKアクセント表示", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("カード内の辞書一致語にNHKアクセントを付ける", fontWeight = FontWeight.Bold)
+                Text(
+                    "長い語を優先して照合し、複数候補は辞書の第一候補を表示します。正誤判定やAnkiDroidの内容は変更しません。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = settings.nhkPitchEnabled,
+                onCheckedChange = { onChange(settings.copy(nhkPitchEnabled = it)) },
+                enabled = pitchDictionaryCount > 0,
+            )
+        }
+        Text(
+            if (pitchDictionaryCount > 0) "取込済み：${pitchDictionaryCount}語" else "NHK辞書は未取込です。",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        pitchImportMessage?.let {
+            Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        OutlinedButton(onClick = onImportPitchDictionary, modifier = Modifier.fillMaxWidth()) {
+            Text("NHK-pitch辞書ファイルを取り込む")
+        }
+        if (pitchDictionaryCount > 0) {
+            TextButton(onClick = onClearPitchDictionary, modifier = Modifier.fillMaxWidth()) {
+                Text("取り込んだNHK辞書を削除", color = WrongRed)
             }
         }
 
@@ -2866,6 +3163,7 @@ private fun QuizScreen(
     onCardShown: (Long) -> Unit,
     onSaveCardEdit: (QuizItem, List<String>) -> Unit,
     onClearCardEdit: (QuizItem) -> Unit,
+    pitchIndex: PitchIndex?,
     onFinish: (RoundResult) -> Unit,
     onQuit: () -> Unit,
 ) {
@@ -3493,7 +3791,7 @@ private fun QuizScreen(
             if (phase == Phase.ASKING) {
                 SelectionContainer {
                     Text(
-                        promptText,
+                        pitchIndex?.annotate(promptText) ?: promptText,
                         fontSize = gameFontSizeSp.sp,
                         lineHeight = (gameFontSizeSp * 1.25f).sp,
                         fontWeight = FontWeight.Bold,
@@ -3533,7 +3831,7 @@ private fun QuizScreen(
                     Spacer(Modifier.height(14.dp))
                     SelectionContainer {
                         Text(
-                            promptText,
+                            pitchIndex?.annotate(promptText) ?: promptText,
                             fontSize = (gameFontSizeSp * 0.70f).coerceAtLeast(16f).sp,
                             lineHeight = (gameFontSizeSp * 0.90f).coerceAtLeast(22f).sp,
                             fontWeight = FontWeight.Bold,
@@ -3543,7 +3841,7 @@ private fun QuizScreen(
                     Spacer(Modifier.height(6.dp))
                     SelectionContainer {
                         Text(
-                            answerText,
+                            pitchIndex?.annotate(answerText) ?: answerText,
                             fontSize = (gameFontSizeSp * 0.55f).coerceAtLeast(16f).sp,
                             lineHeight = (gameFontSizeSp * 0.75f).coerceAtLeast(22f).sp,
                             textAlign = TextAlign.Center,
@@ -3633,7 +3931,7 @@ private fun QuizScreen(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     ) {
                         Text(
-                            option.replace("\n", " "),
+                            pitchIndex?.annotate(option.replace("\n", " ")) ?: option.replace("\n", " "),
                             fontSize = (gameFontSizeSp * 0.48f).coerceIn(16f, 36f).sp,
                         )
                     }
@@ -3724,6 +4022,7 @@ private fun FlashcardScreen(
     readParentheses: Boolean,
     showBothInitially: Boolean,
     manualAdvanceWhenShowBoth: Boolean,
+    pitchIndex: PitchIndex?,
     initialFontSizeSp: Int,
     onGameFontSizeChanged: (Int) -> Unit,
     onSaveCardEdit: (QuizItem, List<String>) -> Unit,
@@ -4060,11 +4359,18 @@ private fun FlashcardScreen(
             .focusRequester(hardwareKeyFocusRequester)
             .focusable()
             .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyUp && event.key == Key.Spacebar) {
-                    handleSpaceKey()
-                    true
-                } else {
-                    false
+                when {
+                    event.type == KeyEventType.KeyUp && event.key == Key.Spacebar -> {
+                        handleSpaceKey()
+                        true
+                    }
+                    event.type == KeyEventType.KeyUp && event.key == Key.Backspace -> {
+                        handlePreviousAction()
+                        true
+                    }
+                    event.type == KeyEventType.KeyDown &&
+                        (event.key == Key.Spacebar || event.key == Key.Backspace) -> true
+                    else -> false
                 }
             },
     ) {
@@ -4146,7 +4452,7 @@ private fun FlashcardScreen(
             ) {
                 SelectionContainer {
                     Text(
-                        front,
+                        pitchIndex?.annotate(front) ?: front,
                         fontSize = gameFontSizeSp.sp,
                         lineHeight = (gameFontSizeSp * 1.25f).sp,
                         fontWeight = FontWeight.Bold,
@@ -4159,7 +4465,7 @@ private fun FlashcardScreen(
                     Spacer(Modifier.height(16.dp))
                     SelectionContainer {
                         Text(
-                            back,
+                            pitchIndex?.annotate(back) ?: back,
                             fontSize = (gameFontSizeSp * 0.60f).coerceAtLeast(16f).sp,
                             lineHeight = (gameFontSizeSp * 0.82f).coerceAtLeast(22f).sp,
                             textAlign = TextAlign.Center,

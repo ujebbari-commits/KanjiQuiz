@@ -1,9 +1,10 @@
 "use strict";
 
-const APP_VERSION = "0.1.31";
+const APP_VERSION = "0.1.32";
 const DB_NAME = "KanjiQuizWeb";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_DECKS = "decks";
+const STORE_PITCH = "pitch";
 const TIME_ATTACK_SEC = 60;
 const THREE_CORRECT_TARGET = 3;
 const HISTORY_LIMIT = 50;
@@ -41,7 +42,8 @@ const DEFAULT_SETTINGS = {
   gameFontSize: 44,
   pauseWhileSelecting: true,
   sharedThreeCorrectAllModes: false,
-  newOnly: false
+  newOnly: false,
+  nhkPitchEnabled: false
 };
 
 const app = document.getElementById("app");
@@ -71,6 +73,9 @@ function openDb() {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_DECKS)) {
         db.createObjectStore(STORE_DECKS, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(STORE_PITCH)) {
+        db.createObjectStore(STORE_PITCH, { keyPath: "term" });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -104,6 +109,38 @@ async function dbDeleteDeck(id) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_DECKS, "readwrite");
     tx.objectStore(STORE_DECKS).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function dbReplacePitchEntries(entries) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_PITCH, "readwrite");
+    const store = tx.objectStore(STORE_PITCH);
+    store.clear();
+    for (const entry of entries) store.put(entry);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error("NHK辞書の保存に失敗しました。"));
+  });
+}
+
+async function dbGetAllPitchEntries() {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_PITCH, "readonly");
+    const request = tx.objectStore(STORE_PITCH).getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function dbClearPitchEntries() {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_PITCH, "readwrite");
+    tx.objectStore(STORE_PITCH).clear();
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -146,7 +183,8 @@ function loadSettings() {
     edgeReaderCount: clampInt(saved.edgeReaderCount ?? DEFAULT_SETTINGS.edgeReaderCount, 1, 9999),
     gameFontSize: clampInt(saved.gameFontSize ?? DEFAULT_SETTINGS.gameFontSize, 16, 96),
     gameMode: saved.gameMode === "DAILY" ? "NORMAL" : (saved.gameMode || DEFAULT_SETTINGS.gameMode),
-    newOnly: Boolean(saved.newOnly)
+    newOnly: Boolean(saved.newOnly),
+    nhkPitchEnabled: Boolean(saved.nhkPitchEnabled)
   };
 }
 
@@ -507,6 +545,171 @@ function cleanText(value) {
     .replace(/[ \t]*\n[ \t]*/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+const PITCH_SMALL_KANA = new Set([..."ゃゅょぁぃぅぇぉゎャュョァィゥェォヮ"]);
+let pitchMapCache = null;
+let pitchMaxTermLength = 0;
+let pitchLoadPromise = null;
+
+function splitPitchMoras(kana) {
+  const moras = [];
+  for (const ch of String(kana || "")) {
+    if (PITCH_SMALL_KANA.has(ch) && moras.length) moras[moras.length - 1] += ch;
+    else moras.push(ch);
+  }
+  return moras;
+}
+
+function pitchPositionToArrows(kana, position) {
+  const moras = splitPitchMoras(kana);
+  if (!moras.length) return String(kana || "");
+  const pos = Number(position);
+  if (pos === 0) return moras.length === 1 ? moras[0] : `${moras[0]}↑${moras.slice(1).join("")}`;
+  if (pos === 1) return `${moras[0]}↓${moras.slice(1).join("")}`;
+  if (pos > 1 && pos <= moras.length) {
+    return `${moras[0]}↑${moras.slice(1, pos).join("")}↓${moras.slice(pos).join("")}`;
+  }
+  return String(kana || "");
+}
+
+function collectPitchPositions(node, output) {
+  if (Array.isArray(node)) {
+    for (const child of node) collectPitchPositions(child, output);
+    return;
+  }
+  if (!node || typeof node !== "object") return;
+  const data = node.data;
+  if (data && typeof data === "object" && String(data.pitchPosition) === "true" && typeof node.content === "string") {
+    const match = node.content.match(/\[(\d+)\]/);
+    if (match) output.push(Number(match[1]));
+  }
+  if (Array.isArray(node.pitches)) {
+    for (const pitch of node.pitches) {
+      if (pitch && typeof pitch === "object" && Number.isFinite(Number(pitch.position))) {
+        output.push(Number(pitch.position));
+      }
+    }
+  }
+  for (const value of Object.values(node)) collectPitchPositions(value, output);
+}
+
+function extractPitchReading(node, fallback) {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const value = extractPitchReading(child, "");
+      if (value) return value;
+    }
+    return fallback;
+  }
+  if (!node || typeof node !== "object") return fallback;
+  if (typeof node.reading === "string" && node.reading) return node.reading;
+  for (const value of Object.values(node)) {
+    const found = extractPitchReading(value, "");
+    if (found) return found;
+  }
+  return fallback;
+}
+
+async function parsePitchDictionaryFiles(files) {
+  const entries = new Map();
+  let sourceEntries = 0;
+  for (const file of [...files].sort((a, b) => a.name.localeCompare(b.name, "ja"))) {
+    const raw = await file.text();
+    if (!raw.trim()) continue;
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data)) continue;
+    for (const row of data) {
+      if (!Array.isArray(row) || typeof row[0] !== "string" || !row[0]) continue;
+      const term = cleanText(row[0]);
+      if (!term) continue;
+      let reading = typeof row[1] === "string" && row[1] ? cleanText(row[1]) : term;
+      const positions = [];
+      collectPitchPositions(row, positions);
+      if (!positions.length) continue;
+      reading = extractPitchReading(row, reading) || reading;
+      const position = [...new Set(positions)].find(value => Number.isInteger(value) && value >= 0);
+      if (position == null) continue;
+      const arrows = pitchPositionToArrows(reading, position);
+      if (!arrows || arrows === reading && position > splitPitchMoras(reading).length) continue;
+      sourceEntries += 1;
+      if (!entries.has(term)) entries.set(term, { term, reading, position, arrows });
+      if (reading && !entries.has(reading)) entries.set(reading, { term: reading, reading, position, arrows });
+    }
+  }
+  return { entries: [...entries.values()], sourceEntries };
+}
+
+async function ensurePitchMapLoaded(force = false) {
+  if (!force && pitchMapCache) return pitchMapCache;
+  if (!force && pitchLoadPromise) return pitchLoadPromise;
+  pitchLoadPromise = (async () => {
+    const rows = await dbGetAllPitchEntries();
+    pitchMapCache = new Map(rows.map(row => [String(row.term), String(row.arrows)]));
+    pitchMaxTermLength = rows.reduce((max, row) => Math.max(max, [...String(row.term)].length), 0);
+    return pitchMapCache;
+  })();
+  try {
+    return await pitchLoadPromise;
+  } finally {
+    pitchLoadPromise = null;
+  }
+}
+
+function isKanaOnly(value) {
+  return /^[ぁ-ゖァ-ヺー]+$/.test(value);
+}
+
+function isJapanesePitchChar(ch) {
+  return /[々〆ヶぁ-ゖァ-ヺー一-龯]/.test(ch);
+}
+
+function annotatePitchText(value) {
+  const text = cleanText(value);
+  if (!loadSettings().nhkPitchEnabled || !pitchMapCache || !pitchMapCache.size || !text) return text;
+  return text.split("\n").map(line => {
+    if (/[↑↓]/.test(line)) return line;
+    const chars = [...line];
+    const output = [];
+    let index = 0;
+    while (index < chars.length) {
+      if (!isJapanesePitchChar(chars[index])) {
+        output.push(chars[index]);
+        index += 1;
+        continue;
+      }
+      const maxLength = Math.min(pitchMaxTermLength, chars.length - index);
+      let matched = "";
+      let arrows = "";
+      for (let length = maxLength; length >= 1; length -= 1) {
+        const candidate = chars.slice(index, index + length).join("");
+        if ([...candidate].some(ch => !isJapanesePitchChar(ch))) continue;
+        if (length === 1) {
+          const leftJoined = index > 0 && isJapanesePitchChar(chars[index - 1]);
+          const rightJoined = index + 1 < chars.length && isJapanesePitchChar(chars[index + 1]);
+          if (leftJoined || rightJoined) continue;
+        }
+        const found = pitchMapCache.get(candidate);
+        if (found) {
+          matched = candidate;
+          arrows = found;
+          break;
+        }
+      }
+      if (!matched) {
+        output.push(chars[index]);
+        index += 1;
+        continue;
+      }
+      output.push(isKanaOnly(matched) ? arrows : `${matched}（${arrows}）`);
+      index += [...matched].length;
+    }
+    return output.join("");
+  }).join("\n");
+}
+
+function cardTextHtml(value) {
+  return textHtml(annotatePitchText(value));
 }
 
 function kataToHira(value) {
@@ -2528,12 +2731,12 @@ function renderQuizQuestion(session) {
   const controls = document.getElementById("quiz-controls");
   main.className = `prompt-area quiz-arena asking${session.combo >= 5 ? " combo-active" : ""}`;
   main.innerHTML = `
-    <div class="selectable prompt-text" id="selectable-prompt">${textHtml(session.promptText)}</div>
+    <div class="selectable prompt-text" id="selectable-prompt">${cardTextHtml(session.promptText)}</div>
     <button class="btn btn-ghost card-edit-button" id="edit-current-card" type="button">編集</button>`;
   if (session.config.reverse) {
     const choices = session.choices;
     controls.innerHTML = `
-      ${choices.map((choice, index) => `<button class="btn btn-primary btn-choice" type="button" data-choice="${index}">${textHtml(choice.replaceAll("\n", " "))}</button>`).join("")}
+      ${choices.map((choice, index) => `<button class="btn btn-primary btn-choice" type="button" data-choice="${index}">${cardTextHtml(choice.replaceAll("\n", " "))}</button>`).join("")}
       <button class="btn btn-ghost" id="pass-question" type="button">パス →</button>`;
     controls.querySelectorAll("[data-choice]").forEach(button => {
       button.addEventListener("click", () => {
@@ -2636,8 +2839,8 @@ function renderQuizFeedback(session) {
       <div class="game-grade ${session.lastCorrect ? "correct" : "wrong"}">${grade}</div>
       ${milestone ? `<div class="combo-burst">${milestone}</div>` : ""}
       <div class="feedback-title ${session.lastCorrect ? "correct" : "wrong"}">${title}</div>
-      <div class="selectable feedback-question">${textHtml(session.promptText)}</div>
-      <div class="selectable feedback-answer">${textHtml(session.answerText)}</div>
+      <div class="selectable feedback-question">${cardTextHtml(session.promptText)}</div>
+      <div class="selectable feedback-answer">${cardTextHtml(session.answerText)}</div>
       ${!session.lastCorrect && log.input ? `<div class="wrong small">あなたの解答：${escapeHtml(log.input)}</div>` : ""}
       ${session.lastCorrect && session.attemptNumber > 1 ? `<div class="subtle small">${session.attemptNumber}回目の挑戦で正解</div>` : ""}
       ${(session.config.threeCorrectKey || Object.keys(session.config.threeCorrectKeyByCard || {}).length) ? `<div class="${currentThree >= THREE_CORRECT_TARGET ? "correct" : "subtle"}">
@@ -3074,7 +3277,6 @@ function renderFlash() {
     beginFlashPhase({ preserveWait: false });
   });
   flash.keyHandler = event => {
-    if (event.code !== "Space" && event.key !== " ") return;
     if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
     const target = event.target;
     if (target instanceof HTMLElement &&
@@ -3082,10 +3284,17 @@ function renderFlash() {
          target.closest("input, textarea, select, [contenteditable='true']"))) {
       return;
     }
-    event.preventDefault();
-    event.stopPropagation();
-
-    handleFlashNext();
+    if (event.code === "Space" || event.key === " ") {
+      event.preventDefault();
+      event.stopPropagation();
+      handleFlashNext();
+      return;
+    }
+    if (event.code === "Backspace" || event.key === "Backspace") {
+      event.preventDefault();
+      event.stopPropagation();
+      handleFlashPrevious();
+    }
   };
   document.addEventListener("keydown", flash.keyHandler);
 
@@ -3141,8 +3350,8 @@ function renderFlashCardContent() {
   const revealBack = flash.showBothInitially || flash.phase === "BACK";
   document.getElementById("flash-content").innerHTML = `
     <div class="stack">
-      <div class="selectable flash-question">${textHtml(item.question)}</div>
-      ${revealBack ? `<div class="selectable flash-answer">${textHtml(item.answer)}</div>` : ""}
+      <div class="selectable flash-question">${cardTextHtml(item.question)}</div>
+      ${revealBack ? `<div class="selectable flash-answer">${cardTextHtml(item.answer)}</div>` : ""}
     </div>`;
   const imageSearch = document.getElementById("flash-google-image-search");
   if (imageSearch) {
@@ -3444,6 +3653,15 @@ function renderSettings() {
         <label class="row"><input id="s-weak" type="checkbox" ${settings.weakPriority ? "checked" : ""}><span>苦手カードを優先</span></label>
         <label class="row"><input id="s-selection-pause" type="checkbox" ${settings.pauseWhileSelecting ? "checked" : ""}><span>文字選択中はタイマーを停止</span></label>
         <label class="row"><input id="s-shared-three-all" type="checkbox" ${settings.sharedThreeCorrectAllModes ? "checked" : ""}><span>成功回数を全モードで共通にする（3回で全モードから除外）</span></label>
+        <div class="card stack">
+          <strong>NHKアクセント表示</strong>
+          <label class="row"><input id="s-nhk-pitch-enabled" type="checkbox" ${settings.nhkPitchEnabled ? "checked" : ""}><span>カード内の辞書一致語にNHKアクセントを付ける</span></label>
+          <div class="subtle small">Yomitan形式の term_bank_*.json / term_meta_bank_*.json を複数選択して取り込みます。長い語を優先して照合し、複数候補は辞書の第一候補を表示します。</div>
+          <input class="field" id="nhk-pitch-files" type="file" accept="application/json,.json" multiple>
+          <button class="btn btn-ghost btn-wide" id="import-nhk-pitch" type="button">選択したNHK-pitch辞書を取り込む</button>
+          <button class="btn btn-danger btn-wide" id="clear-nhk-pitch" type="button">取り込んだNHK辞書を削除</button>
+          <div id="nhk-pitch-status" class="subtle small"></div>
+        </div>
         <button class="btn btn-primary btn-wide" id="save-settings" type="button">保存</button>
         <div id="settings-message"></div>
       </div>
@@ -3472,7 +3690,52 @@ function renderSettings() {
     document.getElementById("flash-manual-advance-setting").hidden = !event.target.checked;
   });
 
-  document.getElementById("save-settings").addEventListener("click", () => {
+  const pitchStatus = document.getElementById("nhk-pitch-status");
+  const updatePitchStatus = () => {
+    const meta = readJson("kq.pitchMeta", null);
+    pitchStatus.textContent = meta?.count
+      ? `取込済み：${Number(meta.count).toLocaleString()}語（${meta.files || 0}ファイル）`
+      : "NHK辞書は未取込です。";
+  };
+  updatePitchStatus();
+  document.getElementById("import-nhk-pitch").addEventListener("click", async () => {
+    const files = [...document.getElementById("nhk-pitch-files").files];
+    if (!files.length) {
+      pitchStatus.innerHTML = `<span class="wrong">term_bankのJSONファイルを選択してください。</span>`;
+      return;
+    }
+    pitchStatus.textContent = `辞書を解析中… ${files.length}ファイル`;
+    try {
+      const parsed = await parsePitchDictionaryFiles(files);
+      if (!parsed.entries.length) throw new Error("ピッチ位置を含む辞書項目が見つかりませんでした。");
+      await dbReplacePitchEntries(parsed.entries);
+      writeJson("kq.pitchMeta", {
+        count: parsed.entries.length,
+        sourceEntries: parsed.sourceEntries,
+        files: files.length,
+        importedAt: new Date().toISOString()
+      });
+      await ensurePitchMapLoaded(true);
+      saveSettings({ ...loadSettings(), nhkPitchEnabled: true });
+      document.getElementById("s-nhk-pitch-enabled").checked = true;
+      updatePitchStatus();
+      pitchStatus.innerHTML += `<br><span class="correct">取込完了。保存ボタンを押さなくても表示は有効です。</span>`;
+    } catch (error) {
+      pitchStatus.innerHTML = `<span class="wrong">取込失敗：${escapeHtml(error.message)}</span>`;
+    }
+  });
+  document.getElementById("clear-nhk-pitch").addEventListener("click", async () => {
+    if (!confirm("取り込んだNHK-pitch辞書を削除しますか？")) return;
+    await dbClearPitchEntries();
+    pitchMapCache = null;
+    pitchMaxTermLength = 0;
+    localStorage.removeItem("kq.pitchMeta");
+    saveSettings({ ...loadSettings(), nhkPitchEnabled: false });
+    document.getElementById("s-nhk-pitch-enabled").checked = false;
+    updatePitchStatus();
+  });
+
+  document.getElementById("save-settings").addEventListener("click", async () => {
     const next = {
       ...settings,
       count: clampInt(document.getElementById("s-count").value, -1, 9999),
@@ -3494,9 +3757,11 @@ function renderSettings() {
       newOnly: document.getElementById("s-new-only").checked,
       weakPriority: document.getElementById("s-weak").checked,
       pauseWhileSelecting: document.getElementById("s-selection-pause").checked,
-      sharedThreeCorrectAllModes: document.getElementById("s-shared-three-all").checked
+      sharedThreeCorrectAllModes: document.getElementById("s-shared-three-all").checked,
+      nhkPitchEnabled: document.getElementById("s-nhk-pitch-enabled").checked
     };
     saveSettings(next);
+    if (next.nhkPitchEnabled) await ensurePitchMapLoaded();
     document.getElementById("settings-message").innerHTML = `<div class="success">保存しました。</div>`;
   });
 
@@ -3749,6 +4014,7 @@ window.addEventListener("resize", () => {
 async function init() {
   try {
     await refreshDecks();
+    if (loadSettings().nhkPitchEnabled) await ensurePitchMapLoaded();
     history.replaceState({ screen: "home" }, "", location.href);
     if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
       navigator.serviceWorker.register("./sw.js").catch(() => {});
