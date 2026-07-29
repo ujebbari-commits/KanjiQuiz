@@ -3816,7 +3816,7 @@ private fun QuizScreen(
             if (phase == Phase.ASKING) {
                 SelectionContainer {
                     Text(
-                        pitchDisplayText(promptText, pitchIndex, gameFontSizeSp),
+                        pitchDisplayText(promptText, pitchIndex, gameFontSizeSp.toFloat()),
                         fontSize = gameFontSizeSp.sp,
                         lineHeight = (gameFontSizeSp * 1.25f).sp,
                         fontWeight = FontWeight.Bold,
@@ -4489,7 +4489,7 @@ private fun FlashcardScreen(
             ) {
                 SelectionContainer {
                     Text(
-                        pitchDisplayText(front, pitchIndex, gameFontSizeSp),
+                        pitchDisplayText(front, pitchIndex, gameFontSizeSp.toFloat()),
                         fontSize = gameFontSizeSp.sp,
                         lineHeight = (gameFontSizeSp * 1.25f).sp,
                         fontWeight = FontWeight.Bold,
