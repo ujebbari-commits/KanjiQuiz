@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.33";
+const APP_VERSION = "0.1.34";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 2;
 const STORE_DECKS = "decks";
@@ -656,12 +656,12 @@ async function ensurePitchMapLoaded(force = false) {
   }
 }
 
-function isKanaOnly(value) {
-  return /^[ぁ-ゖァ-ヺー]+$/.test(value);
+function containsKanji(value) {
+  return /[㐀-䶿一-鿿豈-﫿]/u.test(value);
 }
 
 function isJapanesePitchChar(ch) {
-  return /[々〆ヶぁ-ゖァ-ヺー一-龯]/.test(ch);
+  return /[々〆ヶぁ-ゖァ-ヺー㐀-䶿一-鿿豈-﫿]/u.test(ch);
 }
 
 function annotatePitchText(value) {
@@ -684,6 +684,8 @@ function annotatePitchText(value) {
       for (let length = maxLength; length >= 1; length -= 1) {
         const candidate = chars.slice(index, index + length).join("");
         if ([...candidate].some(ch => !isJapanesePitchChar(ch))) continue;
+        // NHKアクセントの自動付与は漢字を含む語だけに限定する。
+        if (!containsKanji(candidate)) continue;
         if (length === 1) {
           const leftJoined = index > 0 && isJapanesePitchChar(chars[index - 1]);
           const rightJoined = index + 1 < chars.length && isJapanesePitchChar(chars[index + 1]);
@@ -701,15 +703,15 @@ function annotatePitchText(value) {
         index += 1;
         continue;
       }
-      output.push(isKanaOnly(matched) ? arrows : `${matched}（${arrows}）`);
+      output.push(`${matched}（${arrows}）`);
       index += [...matched].length;
     }
     return output.join("");
   }).join("\n");
 }
 
-function cardTextHtml(value) {
-  const annotated = annotatePitchText(value);
+function cardTextHtml(value, applyPitch = true) {
+  const annotated = applyPitch ? annotatePitchText(value) : cleanText(value);
   const pattern = /（[^（）\n]*[↑↓][^（）\n]*）/g;
   let html = "";
   let cursor = 0;
@@ -2741,12 +2743,12 @@ function renderQuizQuestion(session) {
   const controls = document.getElementById("quiz-controls");
   main.className = `prompt-area quiz-arena asking${session.combo >= 5 ? " combo-active" : ""}`;
   main.innerHTML = `
-    <div class="selectable prompt-text" id="selectable-prompt">${cardTextHtml(session.promptText)}</div>
+    <div class="selectable prompt-text" id="selectable-prompt">${cardTextHtml(session.promptText, false)}</div>
     <button class="btn btn-ghost card-edit-button" id="edit-current-card" type="button">編集</button>`;
   if (session.config.reverse) {
     const choices = session.choices;
     controls.innerHTML = `
-      ${choices.map((choice, index) => `<button class="btn btn-primary btn-choice" type="button" data-choice="${index}">${cardTextHtml(choice.replaceAll("\n", " "))}</button>`).join("")}
+      ${choices.map((choice, index) => `<button class="btn btn-primary btn-choice" type="button" data-choice="${index}">${cardTextHtml(choice.replaceAll("\n", " "), false)}</button>`).join("")}
       <button class="btn btn-ghost" id="pass-question" type="button">パス →</button>`;
     controls.querySelectorAll("[data-choice]").forEach(button => {
       button.addEventListener("click", () => {
@@ -3360,7 +3362,7 @@ function renderFlashCardContent() {
   const revealBack = flash.showBothInitially || flash.phase === "BACK";
   document.getElementById("flash-content").innerHTML = `
     <div class="stack">
-      <div class="selectable flash-question">${cardTextHtml(item.question)}</div>
+      <div class="selectable flash-question">${cardTextHtml(item.question, revealBack)}</div>
       ${revealBack ? `<div class="selectable flash-answer">${cardTextHtml(item.answer)}</div>` : ""}
     </div>`;
   const imageSearch = document.getElementById("flash-google-image-search");

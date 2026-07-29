@@ -125,7 +125,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.31"
+private const val APP_VERSION = "1.32"
 private const val THREE_CORRECT_TARGET = 3
 
 private data class PitchImportResult(val count: Int, val files: Int)
@@ -154,6 +154,8 @@ private data class PitchIndex(
                 for (length in maxLength downTo 1) {
                     val candidate = line.substring(index, index + length)
                     if (!candidate.all(::isJapanesePitchChar)) continue
+                    // NHKアクセントの自動付与は漢字を含む語だけに限定する。
+                    if (!candidate.any(::isKanjiPitchChar)) continue
                     if (length == 1) {
                         val leftJoined = index > 0 && isJapanesePitchChar(line[index - 1])
                         val rightJoined = index + 1 < line.length && isJapanesePitchChar(line[index + 1])
@@ -169,8 +171,7 @@ private data class PitchIndex(
                     index++
                     continue
                 }
-                if (matched.all(::isKanaPitchChar)) output.append(arrows)
-                else output.append(matched).append('（').append(arrows).append('）')
+                output.append(matched).append('（').append(arrows).append('）')
                 index += matched.length
             }
             output.toString()
@@ -202,9 +203,11 @@ private fun pitchDisplayText(
 private fun isKanaPitchChar(ch: Char): Boolean =
     ch in 'ぁ'..'ゖ' || ch in 'ァ'..'ヺ' || ch == 'ー'
 
+private fun isKanjiPitchChar(ch: Char): Boolean =
+    ch in '㐀'..'䶿' || ch in '一'..'鿿' || ch in '豈'..'﫿'
+
 private fun isJapanesePitchChar(ch: Char): Boolean =
-    isKanaPitchChar(ch) || ch == '々' || ch == '〆' || ch == 'ヶ' ||
-        ch in '㐀'..'䶿' || ch in '一'..'鿿' || ch in '豈'..'﫿'
+    isKanaPitchChar(ch) || isKanjiPitchChar(ch) || ch == '々' || ch == '〆' || ch == 'ヶ'
 
 private object NhkPitchDictionary {
     private const val DATABASE_NAME = "nhk_pitch.db"
@@ -3816,7 +3819,7 @@ private fun QuizScreen(
             if (phase == Phase.ASKING) {
                 SelectionContainer {
                     Text(
-                        pitchDisplayText(promptText, pitchIndex, gameFontSizeSp.toFloat()),
+                        cleanText(promptText),
                         fontSize = gameFontSizeSp.sp,
                         lineHeight = (gameFontSizeSp * 1.25f).sp,
                         fontWeight = FontWeight.Bold,
@@ -3964,11 +3967,7 @@ private fun QuizScreen(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     ) {
                         Text(
-                            pitchDisplayText(
-                                option.replace("\n", " "),
-                                pitchIndex,
-                                (gameFontSizeSp * 0.48f).coerceIn(16f, 36f),
-                            ),
+                            cleanText(option).replace("\n", " "),
                             fontSize = (gameFontSizeSp * 0.48f).coerceIn(16f, 36f).sp,
                         )
                     }
@@ -4489,7 +4488,11 @@ private fun FlashcardScreen(
             ) {
                 SelectionContainer {
                     Text(
-                        pitchDisplayText(front, pitchIndex, gameFontSizeSp.toFloat()),
+                        if (showBothInitially || showingBack) {
+                            pitchDisplayText(front, pitchIndex, gameFontSizeSp.toFloat())
+                        } else {
+                            AnnotatedString(cleanText(front))
+                        },
                         fontSize = gameFontSizeSp.sp,
                         lineHeight = (gameFontSizeSp * 1.25f).sp,
                         fontWeight = FontWeight.Bold,
