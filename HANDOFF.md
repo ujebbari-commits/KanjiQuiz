@@ -418,3 +418,10 @@ git add -A && git commit -m "update" && git push
 - 添付の `yomitan_pitch_offline.py` と同様に、構造化コンテンツの `data.pitchPosition == "true"` と旧 `pitches[].position` の両方から核位置を取得し、モーラ単位で矢印表記へ変換する。
 - 表示時は辞書の最長一致で語を走査。漢字を含む語は `表記（矢印付き読み）`、かな語は矢印付き読みに置換する。すでに↑↓を含む行は二重付与を避けるため変更しない。
 - 表示レイヤーのみであり、正誤判定、カード保存、TTS、Google画像検索、AnkiDroidには影響しない。形態素解析ライブラリは追加していないため、活用形・未知語・文脈依存の同音異義語は完全には解決できない。
+
+
+## v1.31 / Web v0.1.33 追加仕様
+
+- NHK辞書で漢字語に付与する `（矢印付き読み）` 部分は、カード本文の基準文字サイズの50％で描画する。
+- Androidは `AnnotatedString` の `SpanStyle.fontSize`、Webは `.nhk-pitch-reading { font-size: 0.5em; }` を使用する。
+- かな語の直接置換は縮小しない。データ自体は変更せず表示レイヤーだけに適用する。

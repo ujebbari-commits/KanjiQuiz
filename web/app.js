@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.32";
+const APP_VERSION = "0.1.33";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 2;
 const STORE_DECKS = "decks";
@@ -709,7 +709,17 @@ function annotatePitchText(value) {
 }
 
 function cardTextHtml(value) {
-  return textHtml(annotatePitchText(value));
+  const annotated = annotatePitchText(value);
+  const pattern = /（[^（）\n]*[↑↓][^（）\n]*）/g;
+  let html = "";
+  let cursor = 0;
+  for (const match of annotated.matchAll(pattern)) {
+    html += escapeHtml(annotated.slice(cursor, match.index));
+    html += `<span class="nhk-pitch-reading">${escapeHtml(match[0])}</span>`;
+    cursor = match.index + match[0].length;
+  }
+  html += escapeHtml(annotated.slice(cursor));
+  return html.replaceAll("\n", "<br>");
 }
 
 function kataToHira(value) {

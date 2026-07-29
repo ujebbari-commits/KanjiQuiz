@@ -90,7 +90,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -121,7 +125,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.30"
+private const val APP_VERSION = "1.31"
 private const val THREE_CORRECT_TARGET = 3
 
 private data class PitchImportResult(val count: Int, val files: Int)
@@ -171,6 +175,27 @@ private data class PitchIndex(
             }
             output.toString()
         }
+    }
+}
+
+private val pitchReadingParentheticalRegex = Regex("（[^（）\n]*[↑↓][^（）\n]*）")
+
+private fun pitchDisplayText(
+    raw: String,
+    pitchIndex: PitchIndex?,
+    baseFontSizeSp: Float,
+): AnnotatedString {
+    val displayed = pitchIndex?.annotate(raw) ?: raw
+    return buildAnnotatedString {
+        var cursor = 0
+        pitchReadingParentheticalRegex.findAll(displayed).forEach { match ->
+            append(displayed.substring(cursor, match.range.first))
+            withStyle(SpanStyle(fontSize = (baseFontSizeSp * 0.5f).sp)) {
+                append(match.value)
+            }
+            cursor = match.range.last + 1
+        }
+        append(displayed.substring(cursor))
     }
 }
 
@@ -3791,7 +3816,7 @@ private fun QuizScreen(
             if (phase == Phase.ASKING) {
                 SelectionContainer {
                     Text(
-                        pitchIndex?.annotate(promptText) ?: promptText,
+                        pitchDisplayText(promptText, pitchIndex, gameFontSizeSp),
                         fontSize = gameFontSizeSp.sp,
                         lineHeight = (gameFontSizeSp * 1.25f).sp,
                         fontWeight = FontWeight.Bold,
@@ -3831,7 +3856,11 @@ private fun QuizScreen(
                     Spacer(Modifier.height(14.dp))
                     SelectionContainer {
                         Text(
-                            pitchIndex?.annotate(promptText) ?: promptText,
+                            pitchDisplayText(
+                                promptText,
+                                pitchIndex,
+                                (gameFontSizeSp * 0.70f).coerceAtLeast(16f),
+                            ),
                             fontSize = (gameFontSizeSp * 0.70f).coerceAtLeast(16f).sp,
                             lineHeight = (gameFontSizeSp * 0.90f).coerceAtLeast(22f).sp,
                             fontWeight = FontWeight.Bold,
@@ -3841,7 +3870,11 @@ private fun QuizScreen(
                     Spacer(Modifier.height(6.dp))
                     SelectionContainer {
                         Text(
-                            pitchIndex?.annotate(answerText) ?: answerText,
+                            pitchDisplayText(
+                                answerText,
+                                pitchIndex,
+                                (gameFontSizeSp * 0.55f).coerceAtLeast(16f),
+                            ),
                             fontSize = (gameFontSizeSp * 0.55f).coerceAtLeast(16f).sp,
                             lineHeight = (gameFontSizeSp * 0.75f).coerceAtLeast(22f).sp,
                             textAlign = TextAlign.Center,
@@ -3931,7 +3964,11 @@ private fun QuizScreen(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     ) {
                         Text(
-                            pitchIndex?.annotate(option.replace("\n", " ")) ?: option.replace("\n", " "),
+                            pitchDisplayText(
+                                option.replace("\n", " "),
+                                pitchIndex,
+                                (gameFontSizeSp * 0.48f).coerceIn(16f, 36f),
+                            ),
                             fontSize = (gameFontSizeSp * 0.48f).coerceIn(16f, 36f).sp,
                         )
                     }
@@ -4452,7 +4489,7 @@ private fun FlashcardScreen(
             ) {
                 SelectionContainer {
                     Text(
-                        pitchIndex?.annotate(front) ?: front,
+                        pitchDisplayText(front, pitchIndex, gameFontSizeSp),
                         fontSize = gameFontSizeSp.sp,
                         lineHeight = (gameFontSizeSp * 1.25f).sp,
                         fontWeight = FontWeight.Bold,
@@ -4465,7 +4502,11 @@ private fun FlashcardScreen(
                     Spacer(Modifier.height(16.dp))
                     SelectionContainer {
                         Text(
-                            pitchIndex?.annotate(back) ?: back,
+                            pitchDisplayText(
+                                back,
+                                pitchIndex,
+                                (gameFontSizeSp * 0.60f).coerceAtLeast(16f),
+                            ),
                             fontSize = (gameFontSizeSp * 0.60f).coerceAtLeast(16f).sp,
                             lineHeight = (gameFontSizeSp * 0.82f).coerceAtLeast(22f).sp,
                             textAlign = TextAlign.Center,

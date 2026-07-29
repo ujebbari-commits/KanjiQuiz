@@ -216,6 +216,14 @@ th { background: var(--surface-2); }
   overflow-wrap: anywhere;
   touch-action: pan-y;
 }
+
+.nhk-pitch-reading {
+  font-size: 0.5em;
+  font-weight: inherit;
+  line-height: inherit;
+  vertical-align: baseline;
+}
+
 .prompt-text {
   font-size: var(--game-font-size, 44px);
   line-height: 1.32;
