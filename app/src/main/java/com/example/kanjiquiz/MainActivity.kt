@@ -4652,7 +4652,7 @@ private fun FlashcardScreen(
             Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             Text("LV $flashLevel　FLIP XP $flashXp", fontWeight = FontWeight.Bold)
-            Text("めくり $sessionViews回・${sessionUniqueCards.size}種類", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("めくり ${sessionViews}回・${sessionUniqueCards.size}種類", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(24.dp))
             Button(
                 onClick = {
