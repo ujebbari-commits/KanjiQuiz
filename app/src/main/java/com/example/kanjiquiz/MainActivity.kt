@@ -4012,10 +4012,16 @@ private fun QuizScreen(
 
         Text(
             if (presentationCount > 0) "このカードは通算 ${presentationCount}回目の出題" else "出題回数を記録中…",
-            fontSize = if (keyboardVisible) 10.sp else 12.sp,
+            fontSize = if (keyboardVisible) 9.sp else 11.sp,
             color = ComboOrange,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(top = 4.dp),
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp),
         )
         Surface(
             modifier = Modifier

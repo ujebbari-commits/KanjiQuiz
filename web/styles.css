@@ -437,9 +437,12 @@ body.quiz-keyboard-active {
   border-radius: 999px;
   background: color-mix(in srgb, var(--warning) 12%, var(--surface));
   color: var(--warning);
-  font-size: .78rem;
+  font-size: clamp(.68rem, 3.2vw, .78rem);
   font-weight: 850;
   letter-spacing: .02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .presentation-badge.compact { margin: 3px 0; padding: 2px 8px; font-size: .72rem; }
 .history-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
