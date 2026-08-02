@@ -125,7 +125,7 @@ private val DECKS_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/deck
 private val NOTES_URI: Uri = Uri.parse("content://com.ichi2.anki.flashcards/notes")
 
 private const val TIME_ATTACK_SEC = 60f
-private const val APP_VERSION = "1.32"
+private const val APP_VERSION = "1.34"
 private const val THREE_CORRECT_TARGET = 3
 
 private data class PitchImportResult(val count: Int, val files: Int)
@@ -449,6 +449,23 @@ data class HistoryEntry(
     val durationSec: Int = 0,
 )
 
+data class FlashHistoryEntry(
+    val timeMillis: Long,
+    val deck: String,
+    val cardViews: Int,
+    val uniqueCards: Int,
+    val durationSec: Int,
+    val completed: Boolean,
+    val speechEnabled: Boolean,
+)
+
+data class FlashSessionResult(
+    val cardViews: Int,
+    val uniqueCards: Int,
+    val durationSec: Int,
+    val completed: Boolean,
+)
+
 class Store(context: Context) {
     private val sp = context.getSharedPreferences("kanjiquiz", Context.MODE_PRIVATE)
     private val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
@@ -616,6 +633,70 @@ class Store(context: Context) {
     }
 
     fun clearHistory() = sp.edit().remove("history").apply()
+
+    fun loadFlashHistory(): List<FlashHistoryEntry> {
+        val raw = sp.getString("flashHistory", null) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                FlashHistoryEntry(
+                    timeMillis = o.optLong("t", 0L),
+                    deck = o.optString("d", ""),
+                    cardViews = o.optInt("v", 0),
+                    uniqueCards = o.optInt("u", 0),
+                    durationSec = o.optInt("dur", 0),
+                    completed = o.optBoolean("done", false),
+                    speechEnabled = o.optBoolean("speech", false),
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun addFlashHistory(e: FlashHistoryEntry) {
+        val list = (listOf(e) + loadFlashHistory()).take(50)
+        val arr = JSONArray()
+        list.forEach {
+            arr.put(JSONObject().apply {
+                put("t", it.timeMillis)
+                put("d", it.deck)
+                put("v", it.cardViews)
+                put("u", it.uniqueCards)
+                put("dur", it.durationSec)
+                put("done", it.completed)
+                put("speech", it.speechEnabled)
+            })
+        }
+        sp.edit().putString("flashHistory", arr.toString()).apply()
+    }
+
+    fun clearFlashHistory() = sp.edit().remove("flashHistory").apply()
+
+    fun incrementPresentationCount(deckName: String, noteId: Long): Int {
+        if (deckName.isBlank()) return 0
+        val root = runCatching { JSONObject(sp.getString("presentationCounts", "{}") ?: "{}") }
+            .getOrDefault(JSONObject())
+        val deck = root.optJSONObject(deckName) ?: JSONObject()
+        val key = noteId.toString()
+        val next = deck.optInt(key, 0).coerceAtLeast(0) + 1
+        deck.put(key, next)
+        root.put(deckName, deck)
+        sp.edit().putString("presentationCounts", root.toString()).apply()
+        return next
+    }
+
+    fun totalPresentationCount(): Int {
+        val root = runCatching { JSONObject(sp.getString("presentationCounts", "{}") ?: "{}") }
+            .getOrDefault(JSONObject())
+        var total = 0
+        val decks = root.keys()
+        while (decks.hasNext()) {
+            val deck = root.optJSONObject(decks.next()) ?: continue
+            val cards = deck.keys()
+            while (cards.hasNext()) total += deck.optInt(cards.next(), 0).coerceAtLeast(0)
+        }
+        return total
+    }
 
     fun loadCardStats(): MutableMap<Long, IntArray> {
         val raw = sp.getString("cardStats", null) ?: return mutableMapOf()
@@ -1616,7 +1697,12 @@ private fun App() {
 
         Stage.HISTORY -> HistoryScreen(
             entries = store.loadHistory(),
-            onClear = { store.clearHistory() },
+            flashEntries = store.loadFlashHistory(),
+            totalPresentations = store.totalPresentationCount(),
+            onClearAll = {
+                store.clearHistory()
+                store.clearFlashHistory()
+            },
             onBack = { stage = Stage.DECKS },
         )
 
@@ -1790,10 +1876,13 @@ private fun App() {
                         store.updateThreeCorrectProgress(key, noteId, count)
                     }
                 },
-                onCardShown = { noteId ->
-                    val sourceDeck = currentConfig.sourceDeckByNoteId[noteId]
-                        ?: currentConfig.historyDeckName.ifBlank { deckName }
-                    store.markCardSeen(sourceDeck, noteId)
+                onCardShown = { shownItem ->
+                    val sourceDeck = shownItem.sourceDeckName.ifBlank {
+                        currentConfig.sourceDeckByNoteId[shownItem.noteId]
+                            ?: currentConfig.historyDeckName.ifBlank { deckName }
+                    }
+                    store.markCardSeen(sourceDeck, shownItem.noteId)
+                    store.incrementPresentationCount(sourceDeck, shownItem.noteId)
                 },
                 onSaveCardEdit = { item, editedFields ->
                     store.saveCardEdit(
@@ -1835,6 +1924,25 @@ private fun App() {
                 onGameFontSizeChanged = { size ->
                     settings = settings.copy(gameFontSizeSp = size)
                     store.saveSettings(settings)
+                },
+                onCardShown = { shownItem ->
+                    store.markCardSeen(shownItem.sourceDeckName, shownItem.noteId)
+                    store.incrementPresentationCount(shownItem.sourceDeckName, shownItem.noteId)
+                },
+                onSessionFinished = { result ->
+                    if (result.cardViews > 0) {
+                        store.addFlashHistory(
+                            FlashHistoryEntry(
+                                timeMillis = System.currentTimeMillis(),
+                                deck = deckName,
+                                cardViews = result.cardViews,
+                                uniqueCards = result.uniqueCards,
+                                durationSec = result.durationSec,
+                                completed = result.completed,
+                                speechEnabled = settings.flashSpeechEnabled,
+                            )
+                        )
+                    }
                 },
                 onSaveCardEdit = { item, editedFields ->
                     store.saveCardEdit(
@@ -2529,24 +2637,49 @@ private fun SettingsScreen(
 }
 
 @Composable
-private fun HistoryScreen(entries: List<HistoryEntry>, onClear: () -> Unit, onBack: () -> Unit) {
+private fun HistoryScreen(
+    entries: List<HistoryEntry>,
+    flashEntries: List<FlashHistoryEntry>,
+    totalPresentations: Int,
+    onClearAll: () -> Unit,
+    onBack: () -> Unit,
+) {
     BackHandler { onBack() }
     var cleared by remember { mutableStateOf(false) }
+    var tab by remember { mutableStateOf("ALL") }
     var deckFilter by remember { mutableStateOf("ALL") }
     var modeFilter by remember { mutableStateOf("ALL") }
     var directionFilter by remember { mutableStateOf("ALL") }
-    val list = if (cleared) emptyList() else entries
-    val deckOptions = list.map { it.deck }.distinct().sorted()
-    val modeOptions = list.map { it.gameMode }.distinct().sortedBy { it.ordinal }
-    val filtered = list.filter { entry ->
+    val quizList = if (cleared) emptyList() else entries
+    val flipList = if (cleared) emptyList() else flashEntries
+    val fmt = remember { SimpleDateFormat("M/d HH:mm", Locale.JAPAN) }
+
+    val quizXp = quizList.sumOf { it.score }
+    val flipXp = flipList.sumOf {
+        it.cardViews * 20 + it.uniqueCards * 10 + it.durationSec / 10 + if (it.completed) 100 else 0
+    }
+    val totalXp = quizXp + flipXp
+    val totalLevel = totalXp / 1000 + 1
+    val totalTime = quizList.sumOf { it.durationSec } + flipList.sumOf { it.durationSec }
+    val totalSessions = quizList.size + flipList.size
+    val rank = when {
+        totalLevel >= 50 -> "KANJI LEGEND"
+        totalLevel >= 25 -> "MASTER SCHOLAR"
+        totalLevel >= 10 -> "WORD HUNTER"
+        totalLevel >= 5 -> "RISING PLAYER"
+        else -> "ROOKIE"
+    }
+
+    val deckOptions = quizList.map { it.deck }.distinct().sorted()
+    val modeOptions = quizList.map { it.gameMode }.distinct().sortedBy { it.ordinal }
+    val filteredQuiz = quizList.filter { entry ->
         (deckFilter == "ALL" || entry.deck == deckFilter) &&
             (modeFilter == "ALL" || entry.gameMode.name == modeFilter) &&
             (directionFilter == "ALL" ||
                 (directionFilter == "REVERSE" && entry.reverse) ||
                 (directionFilter == "FORWARD" && !entry.reverse))
     }
-    val fmt = remember { SimpleDateFormat("M/d HH:mm", Locale.JAPAN) }
-    val rates = filtered.reversed()
+    val rates = filteredQuiz.reversed()
         .map { if (it.total == 0) 0 else it.correct * 100 / it.total }
         .takeLast(20)
 
@@ -2556,113 +2689,202 @@ private fun HistoryScreen(entries: List<HistoryEntry>, onClear: () -> Unit, onBa
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("ゲーム履歴", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            if (list.isNotEmpty()) {
-                TextButton(onClick = { onClear(); cleared = true }) { Text("消去") }
+            Column {
+                Text("PLAYER STATS", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text("LV $totalLevel・$rank", color = ComboOrange, fontWeight = FontWeight.Bold)
+            }
+            if (quizList.isNotEmpty() || flipList.isNotEmpty()) {
+                TextButton(onClick = { onClearAll(); cleared = true }) { Text("全消去") }
             }
         }
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(8.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatTile("TOTAL XP", totalXp.toString(), Modifier.weight(1f))
+            StatTile("PLAY", "${totalTime / 60}分", Modifier.weight(1f))
+            StatTile("出題", "${totalPresentations}回", Modifier.weight(1f))
+        }
+        Spacer(Modifier.height(8.dp))
+        ChipRow(
+            label = "表示",
+            options = listOf("総合" to "ALL", "クイズ" to "QUIZ", "めくり" to "FLASH"),
+            selected = tab,
+            onSelect = { tab = it },
+        )
 
-        if (list.isEmpty()) {
-            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text("まだ記録がありません", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        } else {
-            ChipRow(
-                label = "デッキ",
-                options = listOf("全部" to "ALL") + deckOptions.map { it to it },
-                selected = deckFilter,
-                onSelect = { deckFilter = it },
-            )
-            ChipRow(
-                label = "ゲーム形式",
-                options = listOf("全部" to "ALL") + modeOptions.map { gameModeLabel(it) to it.name },
-                selected = modeFilter,
-                onSelect = { modeFilter = it },
-            )
-            ChipRow(
-                label = "出題方向",
-                options = listOf(
-                    "全部" to "ALL",
-                    "漢字→よみ" to "FORWARD",
-                    "よみ→漢字" to "REVERSE",
-                ),
-                selected = directionFilter,
-                onSelect = { directionFilter = it },
-            )
-
-            if (filtered.isEmpty()) {
-                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Text("この条件の記録はありません",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            } else {
-                Text("正答率の推移（選択中の条件）", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        when (tab) {
+            "ALL" -> {
+                val quizCorrect = quizList.sumOf { it.correct }
+                val quizTotal = quizList.sumOf { it.total }
+                val rate = if (quizTotal == 0) 0 else quizCorrect * 100 / quizTotal
                 Spacer(Modifier.height(6.dp))
-                AccuracyChart(rates)
-                Spacer(Modifier.height(8.dp))
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    tonalElevation = 3.dp,
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("CAREER SUMMARY", color = ComboOrange, fontWeight = FontWeight.Bold)
+                        Text("$totalSessions セッション", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                        Text("クイズ正答率 $rate%・めくり ${flipList.sumOf { it.cardViews }}回",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        LinearProgressIndicator(
+                            progress = { ((totalXp % 1000) / 1000f).coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth().padding(top = 10.dp).height(8.dp),
+                            color = ComboOrange,
+                        )
+                        Text("次のレベルまで ${1000 - totalXp % 1000} XP", fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
                 LazyColumn(modifier = Modifier.weight(1f)) {
-                    items(filtered) { entry ->
-                        val rate = if (entry.total == 0) 0 else entry.correct * 100 / entry.total
+                    item { Text("最近のプレイ", fontWeight = FontWeight.Bold) }
+                    val combined = buildList<Pair<Long, String>> {
+                        quizList.take(10).forEach { add(it.timeMillis to "QUIZ") }
+                        flipList.take(10).forEach { add(it.timeMillis to "FLASH") }
+                    }.sortedByDescending { it.first }.take(12)
+                    items(combined) { (time, type) ->
+                        val text = if (type == "QUIZ") {
+                            val e = quizList.first { it.timeMillis == time }
+                            val r = if (e.total == 0) 0 else e.correct * 100 / e.total
+                            "⚔ ${e.deck}　${gameModeLabel(e.gameMode)}　${e.correct}/${e.total}（$r%）"
+                        } else {
+                            val e = flipList.first { it.timeMillis == time }
+                            "📖 ${e.deck}　${e.cardViews}回・${e.uniqueCards}種類"
+                        }
                         Surface(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                             tonalElevation = 2.dp,
                             shape = RoundedCornerShape(12.dp),
                         ) {
-                            Column(modifier = Modifier.padding(14.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                ) {
-                                    Text(
-                                        entry.deck,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                    Text(
-                                        fmt.format(Date(entry.timeMillis)),
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
+                            Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(text, modifier = Modifier.weight(1f), maxLines = 2)
+                                Text(fmt.format(Date(time)), fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
+            "QUIZ" -> {
+                if (quizList.isEmpty()) {
+                    Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        Text("クイズの記録はまだありません", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                } else {
+                    ChipRow("デッキ", listOf("全部" to "ALL") + deckOptions.map { it to it }, deckFilter) { deckFilter = it }
+                    ChipRow("ゲーム形式", listOf("全部" to "ALL") + modeOptions.map { gameModeLabel(it) to it.name }, modeFilter) { modeFilter = it }
+                    ChipRow("出題方向", listOf("全部" to "ALL", "漢字→よみ" to "FORWARD", "よみ→漢字" to "REVERSE"), directionFilter) { directionFilter = it }
+                    if (filteredQuiz.isEmpty()) {
+                        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            Text("この条件の記録はありません", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    } else {
+                        val correct = filteredQuiz.sumOf { it.correct }
+                        val total = filteredQuiz.sumOf { it.total }
+                        val rate = if (total == 0) 0 else correct * 100 / total
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            StatTile("正答率", "$rate%", Modifier.weight(1f))
+                            StatTile("BEST", (filteredQuiz.maxOfOrNull { it.score } ?: 0).toString(), Modifier.weight(1f))
+                            StatTile("COMBO", (filteredQuiz.maxOfOrNull { it.maxCombo } ?: 0).toString(), Modifier.weight(1f))
+                        }
+                        Text("ACCURACY QUEST", fontWeight = FontWeight.Bold, fontSize = 14.sp,
+                            modifier = Modifier.padding(top = 8.dp))
+                        AccuracyChart(rates)
+                        LazyColumn(modifier = Modifier.weight(1f)) {
+                            items(filteredQuiz) { entry ->
+                                val r = if (entry.total == 0) 0 else entry.correct * 100 / entry.total
+                                val grade = when {
+                                    r == 100 -> "S"
+                                    r >= 90 -> "A"
+                                    r >= 75 -> "B"
+                                    r >= 60 -> "C"
+                                    else -> "D"
                                 }
-                                Spacer(Modifier.height(4.dp))
-                                val direction = if (entry.reverse) "よみ→漢字" else "漢字→よみ"
-                                val weak = if (entry.weakPriority &&
-                                    entry.gameMode in listOf(
-                                        GameMode.NORMAL,
-                                        GameMode.SURVIVAL,
-                                        GameMode.TIME_ATTACK,
-                                        GameMode.THREE_CORRECT,
-                                    )
-                                ) "・苦手優先" else ""
-                                Text(
-                                    "${gameModeLabel(entry.gameMode)}・$direction$weak",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    "SCORE ${entry.score}　正解 ${entry.correct}/${entry.total}（$rate%）",
-                                    fontSize = 14.sp,
-                                )
-                                if (entry.maxCombo > 0 || entry.durationSec > 0) {
-                                    Text(
-                                        "最大コンボ ${entry.maxCombo}　${entry.durationSec}秒",
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                                    tonalElevation = 2.dp,
+                                    shape = RoundedCornerShape(12.dp),
+                                ) {
+                                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Text(grade, fontSize = 28.sp, fontWeight = FontWeight.Bold,
+                                            color = if (grade in listOf("S", "A")) ComboOrange else MaterialTheme.colorScheme.primary)
+                                        Spacer(Modifier.width(12.dp))
+                                        Column(Modifier.weight(1f)) {
+                                            Text(entry.deck, fontWeight = FontWeight.Bold, maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis)
+                                            Text("${gameModeLabel(entry.gameMode)}・SCORE ${entry.score}", fontSize = 12.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            Text("${entry.correct}/${entry.total}（$r%）・最大 ${entry.maxCombo} COMBO")
+                                        }
+                                        Text(fmt.format(Date(entry.timeMillis)), fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
                                 }
                             }
                         }
-                        Spacer(Modifier.height(8.dp))
+                    }
+                }
+            }
+            else -> {
+                if (flipList.isEmpty()) {
+                    Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        Text("めくりの記録はまだありません", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                } else {
+                    val views = flipList.sumOf { it.cardViews }
+                    val unique = flipList.sumOf { it.uniqueCards }
+                    val best = flipList.maxOfOrNull { it.cardViews } ?: 0
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        StatTile("FLIPS", views.toString(), Modifier.weight(1f))
+                        StatTile("UNIQUE", unique.toString(), Modifier.weight(1f))
+                        StatTile("BEST RUN", best.toString(), Modifier.weight(1f))
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    LazyColumn(modifier = Modifier.weight(1f)) {
+                        items(flipList) { entry ->
+                            val xp = entry.cardViews * 20 + entry.uniqueCards * 10 + entry.durationSec / 10 + if (entry.completed) 100 else 0
+                            val title = when {
+                                entry.cardViews >= 100 -> "MARATHON"
+                                entry.cardViews >= 50 -> "LONG RUN"
+                                entry.cardViews >= 20 -> "EXPLORER"
+                                else -> "WARM UP"
+                            }
+                            Surface(
+                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                                tonalElevation = 2.dp,
+                                shape = RoundedCornerShape(12.dp),
+                            ) {
+                                Column(Modifier.padding(14.dp)) {
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                        Text("📖 $title", color = ComboOrange, fontWeight = FontWeight.Bold)
+                                        Text(fmt.format(Date(entry.timeMillis)), fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Text(entry.deck, fontWeight = FontWeight.Bold, maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis)
+                                    Text("${entry.cardViews}めくり・${entry.uniqueCards}種類・${entry.durationSec}秒")
+                                    Text("FLIP XP $xp${if (entry.speechEnabled) "・読み上げ" else ""}${if (entry.completed) "・CLEAR" else ""}",
+                                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
         Spacer(Modifier.height(12.dp))
         Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("もどる") }
+    }
+}
+
+@Composable
+private fun StatTile(label: String, value: String, modifier: Modifier = Modifier) {
+    Surface(modifier = modifier, tonalElevation = 3.dp, shape = RoundedCornerShape(12.dp)) {
+        Column(Modifier.padding(vertical = 10.dp, horizontal = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(label, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(value, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = ComboOrange)
+        }
     }
 }
 
@@ -3188,7 +3410,7 @@ private fun QuizScreen(
     config: RoundConfig,
     onGameFontSizeChanged: (Int) -> Unit,
     onThreeCorrectProgressChanged: (Long, Int) -> Unit,
-    onCardShown: (Long) -> Unit,
+    onCardShown: (QuizItem) -> Int,
     onSaveCardEdit: (QuizItem, List<String>) -> Unit,
     onClearCardEdit: (QuizItem) -> Unit,
     pitchIndex: PitchIndex?,
@@ -3255,6 +3477,7 @@ private fun QuizScreen(
     val answerInputFocusRequester = remember { FocusRequester() }
     var answerInputFocused by remember { mutableStateOf(false) }
     val startedAt = remember { System.currentTimeMillis() }
+    var presentationCount by remember { mutableIntStateOf(0) }
 
     fun changeGameFontSize(delta: Int) {
         val next = (gameFontSizeSp + delta).coerceIn(16, 96)
@@ -3501,8 +3724,8 @@ private fun QuizScreen(
         }
     }
 
-    LaunchedEffect(questionSerial, item.noteId) {
-        onCardShown(item.noteId)
+    LaunchedEffect(questionSerial, item.sourceDeckName, item.noteId) {
+        presentationCount = onCardShown(item)
     }
 
     LaunchedEffect(Unit) {
@@ -3787,6 +4010,13 @@ private fun QuizScreen(
             )
         }
 
+        Text(
+            if (presentationCount > 0) "このカードは通算 ${presentationCount}回目の出題" else "出題回数を記録中…",
+            fontSize = if (keyboardVisible) 10.sp else 12.sp,
+            color = ComboOrange,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(top = 4.dp),
+        )
         Surface(
             modifier = Modifier
                 .weight(1f)
@@ -4037,6 +4267,23 @@ private fun QuizScreen(
                 Text("Google画像で検索")
             }
             Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = {
+                    val query = cleanText(promptText).replace("\n", " ").trim()
+                    if (query.isNotBlank()) {
+                        val request = "「$query」を使った自然な日本語の例文を5つ作ってください。各例文に短い意味説明も付けてください。"
+                        val url = "https://www.google.com/search?udm=50&q=${Uri.encode(request)}"
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = cleanText(promptText).isNotBlank(),
+            ) {
+                Text("Google AIで例文")
+            }
+            Spacer(Modifier.height(8.dp))
             Button(onClick = { goNext() }, modifier = Modifier.fillMaxWidth()) {
                 Text(if (finishesAfterFeedback) "結果を見る" else "次へ")
             }
@@ -4061,6 +4308,8 @@ private fun FlashcardScreen(
     pitchIndex: PitchIndex?,
     initialFontSizeSp: Int,
     onGameFontSizeChanged: (Int) -> Unit,
+    onCardShown: (QuizItem) -> Int,
+    onSessionFinished: (FlashSessionResult) -> Unit,
     onSaveCardEdit: (QuizItem, List<String>) -> Unit,
     onClearCardEdit: (QuizItem) -> Unit,
     onDone: () -> Unit,
@@ -4119,12 +4368,6 @@ private fun FlashcardScreen(
         }
     }
 
-    fun stopAndDone() {
-        tts.stop()
-        onDone()
-    }
-    BackHandler { stopAndDone() }
-
     val perCardMillis = secDeci.coerceAtLeast(0) * 100L
     var index by remember { mutableIntStateOf(0) }
     var elapsed by remember { mutableFloatStateOf(0f) }
@@ -4138,6 +4381,32 @@ private fun FlashcardScreen(
     var pausedBeforeEditor by remember { mutableStateOf(false) }
     var editRevision by remember { mutableIntStateOf(0) }
     var awaitingManualNext by remember { mutableStateOf(false) }
+    var presentationCount by remember { mutableIntStateOf(0) }
+    var sessionStartedAt by remember { mutableStateOf(System.currentTimeMillis()) }
+    var sessionViews by remember { mutableIntStateOf(0) }
+    val sessionUniqueCards = remember { mutableStateMapOf<String, Boolean>() }
+    var sessionRecorded by remember { mutableStateOf(false) }
+    var sessionRound by remember { mutableIntStateOf(0) }
+
+    fun recordSession(completed: Boolean) {
+        if (sessionRecorded || sessionViews <= 0) return
+        sessionRecorded = true
+        onSessionFinished(
+            FlashSessionResult(
+                cardViews = sessionViews,
+                uniqueCards = sessionUniqueCards.size,
+                durationSec = ((System.currentTimeMillis() - sessionStartedAt) / 1000L).toInt(),
+                completed = completed,
+            )
+        )
+    }
+
+    fun stopAndDone() {
+        recordSession(completed = false)
+        tts.stop()
+        onDone()
+    }
+    BackHandler { stopAndDone() }
 
     LaunchedEffect(showCardEditor, finished) {
         if (!showCardEditor && !finished) hardwareKeyFocusRequester.requestFocus()
@@ -4145,6 +4414,17 @@ private fun FlashcardScreen(
 
     val effectiveSpeech = speechEnabled && !ttsFailed
     val manualAdvanceActive = showBothInitially && manualAdvanceWhenShowBoth
+    val shownItem = items[index]
+
+    LaunchedEffect(sessionRound, index, shownItem.sourceDeckName, shownItem.noteId) {
+        presentationCount = onCardShown(shownItem)
+        sessionViews += 1
+        sessionUniqueCards["${shownItem.sourceDeckName}|${shownItem.noteId}"] = true
+    }
+
+    LaunchedEffect(finished) {
+        if (finished) recordSession(completed = true)
+    }
 
     fun changeGameFontSize(delta: Int) {
         val next = (gameFontSizeSp + delta).coerceIn(16, 96)
@@ -4358,14 +4638,31 @@ private fun FlashcardScreen(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text("おわり 🎉", fontSize = 32.sp, fontWeight = FontWeight.Bold)
+            val flashXp = sessionViews * 20 + sessionUniqueCards.size * 10 +
+                ((System.currentTimeMillis() - sessionStartedAt) / 10_000L).toInt() + 100
+            val flashLevel = flashXp / 500 + 1
+            val title = when {
+                sessionViews >= 100 -> "MARATHON MASTER"
+                sessionViews >= 50 -> "LONG RUNNER"
+                sessionViews >= 20 -> "CARD EXPLORER"
+                else -> "WARM UP CLEAR"
+            }
+            Text("STAGE CLEAR", fontSize = 16.sp, color = ComboOrange, fontWeight = FontWeight.Bold)
+            Text("★★★★★", fontSize = 28.sp, color = ComboOrange)
+            Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
-            Text("${items.size}枚めくりました", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("LV $flashLevel　FLIP XP $flashXp", fontWeight = FontWeight.Bold)
+            Text("めくり $sessionViews回・${sessionUniqueCards.size}種類", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(24.dp))
             Button(
                 onClick = {
                     finished = false
                     paused = false
+                    sessionStartedAt = System.currentTimeMillis()
+                    sessionViews = 0
+                    sessionUniqueCards.clear()
+                    sessionRecorded = false
+                    sessionRound++
                     toCard(0)
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -4417,6 +4714,12 @@ private fun FlashcardScreen(
         ) {
             Column {
                 Text("${index + 1} / ${items.size}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    if (presentationCount > 0) "このカードは通算 ${presentationCount}回目" else "出題回数を記録中…",
+                    fontSize = 12.sp,
+                    color = ComboOrange,
+                    fontWeight = FontWeight.Bold,
+                )
                 if (effectiveSpeech) {
                     Text(
                         if (awaitingManualNext) {
@@ -4549,6 +4852,23 @@ private fun FlashcardScreen(
             enabled = cleanText(front).isNotBlank(),
         ) {
             Text("Google画像で検索")
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = {
+                val query = cleanText(front).replace("\n", " ").trim()
+                if (query.isNotBlank()) {
+                    val request = "「$query」を使った自然な日本語の例文を5つ作ってください。各例文に短い意味説明も付けてください。"
+                    val url = "https://www.google.com/search?udm=50&q=${Uri.encode(request)}"
+                    runCatching {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = cleanText(front).isNotBlank(),
+        ) {
+            Text("Google AIで例文")
         }
         Spacer(Modifier.height(8.dp))
         if (effectiveSpeech) {

@@ -423,3 +423,66 @@ body.quiz-keyboard-active {
 @media (prefers-reduced-motion: reduce) {
   .quiz-arena.feedback-correct, .quiz-arena.feedback-wrong, .combo-burst, .score-pop { animation: none; }
 }
+
+/* v0.1.35: 通算出題回数とゲーム風統計 */
+.presentation-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto 10px;
+  padding: 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  color: var(--warning);
+  font-size: .78rem;
+  font-weight: 850;
+  letter-spacing: .02em;
+}
+.presentation-badge.compact { margin: 3px 0; padding: 2px 8px; font-size: .72rem; }
+.history-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.rank-banner {
+  padding: 18px;
+  border: 2px solid color-mix(in srgb, var(--warning) 55%, var(--border));
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+}
+.rank-banner.flip-banner { border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); }
+.rank-title { font-size: 1.35rem; font-weight: 950; letter-spacing: .035em; }
+.game-accent { color: var(--warning); font-weight: 850; }
+.history-level { height: 8px; }
+.stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.stat-tile {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  background: var(--surface);
+  text-align: center;
+}
+.stat-tile > span { color: var(--muted); font-size: .7rem; font-weight: 800; letter-spacing: .04em; }
+.stat-tile > strong { font-size: 1.2rem; overflow-wrap: anywhere; }
+.stat-tile > small { color: var(--muted); font-size: .68rem; }
+.history-run { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 12px; align-items: center; }
+.history-grade {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--warning) 14%, var(--surface-2));
+  color: var(--warning);
+  font-size: 1.5rem;
+  font-weight: 950;
+}
+.history-grade.flip-grade { color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, var(--surface-2)); }
+.compact-stack { gap: 3px; }
+@media (max-width: 520px) {
+  .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .history-run { grid-template-columns: 44px minmax(0, 1fr); gap: 9px; }
+  .history-grade { width: 42px; height: 42px; font-size: 1.25rem; }
+}

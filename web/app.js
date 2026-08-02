@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.1.34";
+const APP_VERSION = "0.1.36";
 const DB_NAME = "KanjiQuizWeb";
 const DB_VERSION = 2;
 const STORE_DECKS = "decks";
@@ -210,6 +210,7 @@ function applyGameFontStyle(element, value) {
 let quizViewportBaseline = 0;
 let quizInputFocused = false;
 let suppressedQuizClick = null;
+let historyView = "ALL";
 
 function currentQuizViewportHeight() {
   return Math.round(window.visualViewport?.height || window.innerHeight);
@@ -248,6 +249,33 @@ function loadHistory() {
 
 function addHistory(entry) {
   writeJson("kq.history", [entry, ...loadHistory()].slice(0, HISTORY_LIMIT));
+}
+
+function loadFlashHistory() {
+  return readJson("kq.flashHistory", []);
+}
+
+function addFlashHistory(entry) {
+  writeJson("kq.flashHistory", [entry, ...loadFlashHistory()].slice(0, HISTORY_LIMIT));
+}
+
+function loadPresentationCounts() {
+  const value = readJson("kq.presentationCounts", {});
+  return value && typeof value === "object" ? value : {};
+}
+
+function incrementPresentationCount(item, config = null) {
+  const key = itemIdentity(item, config);
+  if (!key) return 0;
+  const counts = loadPresentationCounts();
+  const next = Math.max(0, Number(counts[key]) || 0) + 1;
+  counts[key] = next;
+  writeJson("kq.presentationCounts", counts);
+  return next;
+}
+
+function totalPresentationCount() {
+  return Object.values(loadPresentationCounts()).reduce((sum, value) => sum + Math.max(0, Number(value) || 0), 0);
 }
 
 function loadCardStats() {
@@ -546,6 +574,14 @@ function cleanText(value) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
+
+function googleAiExampleSearchUrl(text) {
+  const query = cleanText(text).replace(/\s+/g, " ").trim();
+  if (!query) return "#";
+  const request = `「${query}」を使った自然な日本語の例文を5つ作ってください。各例文に短い意味説明も付けてください。`;
+  return `https://www.google.com/search?udm=50&q=${encodeURIComponent(request)}`;
+}
+
 
 const PITCH_SMALL_KANA = new Set([..."ゃゅょぁぃぅぇぉゎャュョァィゥェォヮ"]);
 let pitchMapCache = null;
@@ -1262,7 +1298,11 @@ function bindGlobalNav() {
 
 function stopScreenTimersExcept(screen) {
   if (screen !== "quiz" && state.quiz) state.quiz.stopTimer();
-  if (screen !== "flash" && state.flash) state.flash.stop();
+  if (screen !== "flash" && state.flash) {
+    recordFlashSession(state.flash, false);
+    state.flash.stop();
+    state.flash = null;
+  }
 }
 
 function renderHome() {
@@ -1640,7 +1680,7 @@ function renderImport() {
 }
 
 function restoreAppData(appData) {
-  const allowed = ["settings", "history", "cardStats", "seenCards", "streak", "dailyCompleted", "threeCorrectProgress", "dailyChallengeSettings", "cardEdits"];
+  const allowed = ["settings", "history", "flashHistory", "presentationCounts", "cardStats", "seenCards", "streak", "dailyCompleted", "threeCorrectProgress", "dailyChallengeSettings", "cardEdits"];
   for (const key of allowed) {
     if (appData[key] != null) writeJson(`kq.${key}`, appData[key]);
   }
@@ -2274,6 +2314,8 @@ class QuizSession {
     this.index = 0;
     this.attemptNumber = 1;
     this.questionSerial = 0;
+    this.lastPresentedSerial = -1;
+    this.presentationCount = 0;
     this.remaining = config.timeLimitSec;
     this.globalLimit = config.gameMode === "DAILY" && config.dailyGoalType === "TIME"
       ? Math.max(1, Number(config.dailyTargetValue) || 1)
@@ -2734,7 +2776,11 @@ function submitCurrentTypedAnswer(session) {
 
 function renderQuizQuestion(session) {
   if (state.screen !== "quiz" || session.ended) return;
-  markCardSeen(session.item, session.config);
+  if (session.lastPresentedSerial !== session.questionSerial) {
+    session.presentationCount = incrementPresentationCount(session.item, session.config);
+    session.lastPresentedSerial = session.questionSerial;
+    markCardSeen(session.item, session.config);
+  }
   quizInputFocused = false;
   quizViewportBaseline = Math.max(quizViewportBaseline, currentQuizViewportHeight());
   setQuizKeyboardLayout(false);
@@ -2743,6 +2789,7 @@ function renderQuizQuestion(session) {
   const controls = document.getElementById("quiz-controls");
   main.className = `prompt-area quiz-arena asking${session.combo >= 5 ? " combo-active" : ""}`;
   main.innerHTML = `
+    <div class="presentation-badge">このカードは通算 ${session.presentationCount}回目の出題</div>
     <div class="selectable prompt-text" id="selectable-prompt">${cardTextHtml(session.promptText, false)}</div>
     <button class="btn btn-ghost card-edit-button" id="edit-current-card" type="button">編集</button>`;
   if (session.config.reverse) {
@@ -2866,9 +2913,11 @@ function renderQuizFeedback(session) {
 
   const finishAfter = shouldFinishAfterFeedback(session);
   const imageSearchUrl = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(session.promptText.trim())}`;
+  const aiExampleSearchUrl = googleAiExampleSearchUrl(session.promptText);
   document.getElementById("quiz-controls").innerHTML = `
     <button class="btn btn-ghost btn-wide" id="edit-current-card" type="button">カードを編集</button>
     <a class="btn btn-ghost btn-wide" id="google-image-search" href="${escapeHtml(imageSearchUrl)}" target="_blank" rel="noopener noreferrer">Google画像で検索</a>
+    <a class="btn btn-ghost btn-wide" id="google-ai-example-search" href="${escapeHtml(aiExampleSearchUrl)}" target="_blank" rel="noopener noreferrer">Google AIで例文</a>
     <button class="btn btn-primary btn-wide" id="next-question" type="button">${finishAfter ? "結果を見る" : "次へ"}</button>`;
   bindCurrentCardEditor(session);
   document.getElementById("next-question").addEventListener("click", () => session.goNext());
@@ -3208,6 +3257,12 @@ function startFlash(items, settings) {
     keyHandler: null,
     remainingMs: settings.flashcardDeci * 100,
     lastTick: performance.now(),
+    startedAt: Date.now(),
+    cardViews: 0,
+    uniqueCards: new Set(),
+    sessionRecorded: false,
+    presentationCount: 0,
+    deckName: [...new Set(items.map(item => item.sourceDeckName).filter(Boolean))].join(" + ") || "めくりデッキ",
     stop() {
       if (this.timerId != null) clearInterval(this.timerId);
       this.timerId = null;
@@ -3232,6 +3287,7 @@ function renderFlash() {
       <div class="quiz-header">
         <div>
           <div id="flash-count"></div>
+          <div id="flash-presentation-count" class="presentation-badge compact"></div>
           <div id="flash-phase" class="small subtle"></div>
         </div>
         <div class="row row-wrap font-controls">
@@ -3248,6 +3304,7 @@ function renderFlash() {
       <section class="flash-content" id="flash-content"></section>
       <button class="btn btn-ghost btn-wide" id="flash-edit-card" type="button">カードを編集</button>
       <a class="btn btn-ghost btn-wide" id="flash-google-image-search" href="#" target="_blank" rel="noopener noreferrer">Google画像で検索</a>
+      <a class="btn btn-ghost btn-wide" id="flash-google-ai-example-search" href="#" target="_blank" rel="noopener noreferrer">Google AIで例文</a>
       <button class="btn btn-ghost btn-wide" id="flash-repeat-speech" type="button" hidden>現在の面をもう一度読む</button>
       <div class="grid-3">
         <button class="btn btn-ghost" id="flash-prev" type="button">前へ</button>
@@ -3271,6 +3328,7 @@ function renderFlash() {
   document.getElementById("flash-font-smaller").disabled = flash.gameFontSize <= 16;
   document.getElementById("flash-font-larger").disabled = flash.gameFontSize >= 96;
   document.getElementById("finish-flash").addEventListener("click", () => {
+    recordFlashSession(flash, false);
     flash.stop(); state.flash = null; navigate("fields");
   });
   document.getElementById("flash-prev").addEventListener("click", () => handleFlashPrevious());
@@ -3332,6 +3390,28 @@ function renderFlash() {
   flash.timerId = setInterval(tickFlash, 100);
 }
 
+function recordFlashCardShown(flash) {
+  if (!flash || !flash.items.length) return;
+  const item = flash.items[flash.index];
+  flash.presentationCount = incrementPresentationCount(item);
+  flash.cardViews += 1;
+  flash.uniqueCards.add(itemIdentity(item));
+  markCardSeen(item);
+}
+
+function recordFlashSession(flash, completed) {
+  if (!flash || flash.sessionRecorded || flash.cardViews <= 0) return;
+  flash.sessionRecorded = true;
+  addFlashHistory({
+    timeMillis: Date.now(),
+    deck: flash.deckName,
+    cardViews: flash.cardViews,
+    uniqueCards: flash.uniqueCards.size,
+    durationSec: Math.max(0, Math.round((Date.now() - flash.startedAt) / 1000)),
+    completed: Boolean(completed)
+  });
+}
+
 function resetFlashCard() {
   const flash = state.flash;
   if (!flash) return;
@@ -3341,6 +3421,7 @@ function resetFlashCard() {
   const manualAdvance = flash.showBothInitially && flash.manualAdvanceWhenShowBoth;
   flash.remainingMs = flash.speechEnabled ? flash.frontWaitDeci * 100 : flash.secDeci * 100;
   flash.lastTick = performance.now();
+  recordFlashCardShown(flash);
   renderFlashCardContent();
   if (!flash.speechEnabled && manualAdvance) {
     flash.awaitingManualNext = true;
@@ -3366,12 +3447,17 @@ function renderFlashCardContent() {
       ${revealBack ? `<div class="selectable flash-answer">${cardTextHtml(item.answer)}</div>` : ""}
     </div>`;
   const imageSearch = document.getElementById("flash-google-image-search");
+  const query = cleanText(item.question);
   if (imageSearch) {
-    const query = cleanText(item.question);
     imageSearch.href = query
       ? `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`
       : "#";
     imageSearch.setAttribute("aria-disabled", query ? "false" : "true");
+  }
+  const aiExampleSearch = document.getElementById("flash-google-ai-example-search");
+  if (aiExampleSearch) {
+    aiExampleSearch.href = googleAiExampleSearchUrl(item.question);
+    aiExampleSearch.setAttribute("aria-disabled", query ? "false" : "true");
   }
   updateFlashUi();
 }
@@ -3546,6 +3632,7 @@ function moveFlashToPreviousWithAnswer() {
     ? (flash.phase === "FRONT" ? flash.frontWaitDeci : flash.backWaitDeci)
     : flash.secDeci) * 100;
   flash.lastTick = performance.now();
+  recordFlashCardShown(flash);
   renderFlashCardContent();
   if (!flash.paused) beginFlashPhase({ preserveWait: true });
 }
@@ -3581,6 +3668,7 @@ function changeFlash(delta) {
   const next = flash.index + delta;
   if (next < 0) flash.index = 0;
   else if (next >= flash.items.length) {
+    recordFlashSession(flash, true);
     flash.stop(); state.flash = null; navigate("fields"); return;
   } else flash.index = next;
   resetFlashCard();
@@ -3590,6 +3678,8 @@ function updateFlashUi() {
   const flash = state.flash;
   if (!flash) return;
   document.getElementById("flash-count").textContent = `${flash.index + 1} / ${flash.items.length}`;
+  const presentation = document.getElementById("flash-presentation-count");
+  if (presentation) presentation.textContent = `このカードは通算 ${flash.presentationCount}回目の出題`;
   const speechActive = flash.speechEnabled && "speechSynthesis" in window;
   document.getElementById("flash-phase").textContent = flash.awaitingManualNext
     ? "読み上げ完了・次へを押してください"
@@ -3793,6 +3883,8 @@ function renderSettings() {
       appData: {
         settings: loadSettings(),
         history: loadHistory(),
+        flashHistory: loadFlashHistory(),
+        presentationCounts: loadPresentationCounts(),
         cardStats: loadCardStats(),
         seenCards: loadSeenCards(),
         streak: readJson("kq.streak", { date: "", count: 0 }),
@@ -3879,48 +3971,140 @@ function renderCardProgress() {
   });
 }
 
+function statTileHtml(label, value, detail = "") {
+  return `<div class="stat-tile"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong>${detail ? `<small>${escapeHtml(detail)}</small>` : ""}</div>`;
+}
+
+function careerRank(level) {
+  if (level >= 50) return "KANJI LEGEND";
+  if (level >= 25) return "MASTER SCHOLAR";
+  if (level >= 10) return "WORD HUNTER";
+  if (level >= 5) return "RISING PLAYER";
+  return "ROOKIE";
+}
+
 function renderHistory() {
-  const entries = loadHistory();
-  const deckOptions = [...new Set(entries.map(entry => entry.deck))].sort((a, b) => a.localeCompare(b, "ja"));
-  app.innerHTML = shell("履歴", `
+  const quizEntries = loadHistory();
+  const flashEntries = loadFlashHistory();
+  const totalPresentations = totalPresentationCount();
+  const quizXp = quizEntries.reduce((sum, entry) => sum + Math.max(0, Number(entry.score) || 0), 0);
+  const flipXp = flashEntries.reduce((sum, entry) => sum +
+    Math.max(0, Number(entry.cardViews) || 0) * 20 +
+    Math.max(0, Number(entry.uniqueCards) || 0) * 10 +
+    Math.floor(Math.max(0, Number(entry.durationSec) || 0) / 10) +
+    (entry.completed ? 100 : 0), 0);
+  const totalXp = quizXp + flipXp;
+  const level = Math.floor(totalXp / 1000) + 1;
+  const levelProgress = totalXp % 1000;
+  const totalSeconds = quizEntries.reduce((sum, entry) => sum + (Number(entry.durationSec) || 0), 0) +
+    flashEntries.reduce((sum, entry) => sum + (Number(entry.durationSec) || 0), 0);
+  const totalSessions = quizEntries.length + flashEntries.length;
+
+  const tabs = `<div class="history-tabs">
+    ${[["ALL", "総合"], ["QUIZ", "クイズ"], ["FLASH", "めくり"]].map(([key, label]) =>
+      `<button class="btn ${historyView === key ? "btn-primary" : "btn-ghost"}" data-history-view="${key}" type="button">${label}</button>`
+    ).join("")}
+  </div>`;
+
+  let body = "";
+  if (historyView === "ALL") {
+    const correct = quizEntries.reduce((sum, entry) => sum + (Number(entry.correct) || 0), 0);
+    const answered = quizEntries.reduce((sum, entry) => sum + (Number(entry.total) || 0), 0);
+    const rate = answered ? Math.round(correct / answered * 100) : 0;
+    const flipViews = flashEntries.reduce((sum, entry) => sum + (Number(entry.cardViews) || 0), 0);
+    body = `<section class="rank-banner stack">
+      <div class="small game-accent">CAREER SUMMARY</div>
+      <div class="rank-title">LV ${level}・${careerRank(level)}</div>
+      <div class="level-track history-level"><div style="width:${levelProgress / 10}%"></div></div>
+      <div class="subtle small">次のレベルまで ${1000 - levelProgress} XP</div>
+    </section>
+    <div class="stats-grid">
+      ${statTileHtml("TOTAL XP", totalXp)}
+      ${statTileHtml("PLAY", `${Math.floor(totalSeconds / 60)}分`, `${totalSessions}セッション`)}
+      ${statTileHtml("通算出題", `${totalPresentations}回`)}
+      ${statTileHtml("クイズ正答率", `${rate}%`, `${correct}/${answered}`)}
+      ${statTileHtml("めくり回数", `${flipViews}回`, `${flashEntries.length}セッション`)}
+      ${statTileHtml("最高COMBO", Math.max(0, ...quizEntries.map(entry => Number(entry.maxCombo) || 0)))}
+    </div>`;
+  } else if (historyView === "QUIZ") {
+    const correct = quizEntries.reduce((sum, entry) => sum + (Number(entry.correct) || 0), 0);
+    const answered = quizEntries.reduce((sum, entry) => sum + (Number(entry.total) || 0), 0);
+    const rate = answered ? Math.round(correct / answered * 100) : 0;
+    body = `<div class="stats-grid">
+      ${statTileHtml("QUIZ XP", quizXp)}
+      ${statTileHtml("正答率", `${rate}%`)}
+      ${statTileHtml("BEST SCORE", Math.max(0, ...quizEntries.map(entry => Number(entry.score) || 0)))}
+      ${statTileHtml("MAX COMBO", Math.max(0, ...quizEntries.map(entry => Number(entry.maxCombo) || 0)))}
+    </div>
+    <div class="card"><canvas class="chart" id="history-chart" width="720" height="220" aria-label="正答率の推移"></canvas></div>
+    <div class="stack">${quizEntries.length ? quizEntries.map(entry => {
+      const rateEntry = entry.total ? Math.round(entry.correct / entry.total * 100) : 0;
+      const grade = rateEntry === 100 ? "S" : rateEntry >= 80 ? "A" : rateEntry >= 60 ? "B" : rateEntry >= 40 ? "C" : "D";
+      return `<article class="card history-run">
+        <div class="history-grade">${grade}</div>
+        <div class="stack compact-stack">
+          <div class="row-wrap space-between"><strong>${escapeHtml(entry.deck)}</strong><span class="game-accent">${rateEntry}%</span></div>
+          <div>${escapeHtml(GAME_MODES[entry.gameMode] || "通常")}・${entry.reverse ? "逆4択" : "入力"}</div>
+          <div class="subtle small">${formatDateTime(entry.timeMillis)}・SCORE ${entry.score}・${entry.correct}/${entry.total}・最大${entry.maxCombo || 0}コンボ・${entry.durationSec || 0}秒</div>
+        </div>
+      </article>`;
+    }).join("") : `<div class="card center subtle">クイズ履歴はまだありません。</div>`}</div>`;
+  } else {
+    const views = flashEntries.reduce((sum, entry) => sum + (Number(entry.cardViews) || 0), 0);
+    const unique = flashEntries.reduce((sum, entry) => sum + (Number(entry.uniqueCards) || 0), 0);
+    const best = Math.max(0, ...flashEntries.map(entry => Number(entry.cardViews) || 0));
+    const completed = flashEntries.filter(entry => entry.completed).length;
+    body = `<section class="rank-banner flip-banner stack">
+      <div class="small game-accent">FLIP MODE</div>
+      <div class="rank-title">${views >= 1000 ? "MEMORY LEGEND" : views >= 500 ? "CARD MASTER" : views >= 100 ? "FLIP HUNTER" : "FLIP ROOKIE"}</div>
+      <div class="subtle">カードをめくるほどFLIP XPが増えます。</div>
+    </section>
+    <div class="stats-grid">
+      ${statTileHtml("FLIP XP", flipXp)}
+      ${statTileHtml("FLIPS", `${views}回`)}
+      ${statTileHtml("UNIQUE", `${unique}枚`)}
+      ${statTileHtml("BEST RUN", `${best}枚`)}
+      ${statTileHtml("CLEAR", `${completed}回`)}
+      ${statTileHtml("PLAY", `${Math.floor(flashEntries.reduce((sum, e) => sum + (Number(e.durationSec) || 0), 0) / 60)}分`)}
+    </div>
+    <div class="stack">${flashEntries.length ? flashEntries.map(entry => {
+      const sessionXp = (Number(entry.cardViews) || 0) * 20 + (Number(entry.uniqueCards) || 0) * 10 +
+        Math.floor((Number(entry.durationSec) || 0) / 10) + (entry.completed ? 100 : 0);
+      return `<article class="card history-run">
+        <div class="history-grade flip-grade">${entry.completed ? "★" : "▶"}</div>
+        <div class="stack compact-stack">
+          <div class="row-wrap space-between"><strong>${escapeHtml(entry.deck || "めくりデッキ")}</strong><span class="game-accent">+${sessionXp} XP</span></div>
+          <div>${entry.cardViews || 0}回表示・${entry.uniqueCards || 0}枚・${entry.completed ? "完走" : "途中終了"}</div>
+          <div class="subtle small">${formatDateTime(entry.timeMillis)}・${entry.durationSec || 0}秒</div>
+        </div>
+      </article>`;
+    }).join("") : `<div class="card center subtle">めくり履歴はまだありません。</div>`}</div>`;
+  }
+
+  app.innerHTML = shell("PLAYER STATS", `
     <div class="stack">
-      <div class="card grid-3">
-        <label><span>デッキ</span><select class="select" id="history-deck"><option value="">すべて</option>${deckOptions.map(deck => `<option>${escapeHtml(deck)}</option>`).join("")}</select></label>
-        <label><span>ゲーム形式</span><select class="select" id="history-mode"><option value="">すべて</option>${Object.entries(GAME_MODES).map(([key, label]) => `<option value="${key}">${escapeHtml(label)}</option>`).join("")}</select></label>
-        <label><span>出題方向</span><select class="select" id="history-reverse"><option value="">すべて</option><option value="false">入力</option><option value="true">逆4択</option></select></label>
-      </div>
-      <div class="card"><canvas class="chart" id="history-chart" width="720" height="220" aria-label="正答率の推移"></canvas></div>
-      <div id="history-list" class="stack"></div>
-      <button class="btn btn-danger btn-wide" id="clear-history" type="button" ${entries.length ? "" : "disabled"}>履歴を削除</button>
+      ${tabs}
+      ${body}
+      <button class="btn btn-danger btn-wide" id="clear-history" type="button" ${(quizEntries.length || flashEntries.length) ? "" : "disabled"}>統計履歴をすべて削除</button>
       <button class="btn btn-ghost btn-wide" type="button" data-nav="home">戻る</button>
     </div>
   `);
 
-  const update = () => {
-    const deck = document.getElementById("history-deck").value;
-    const mode = document.getElementById("history-mode").value;
-    const reverse = document.getElementById("history-reverse").value;
-    const filtered = entries.filter(entry => (!deck || entry.deck === deck) &&
-      (!mode || entry.gameMode === mode) &&
-      (!reverse || String(Boolean(entry.reverse)) === reverse));
-    const list = document.getElementById("history-list");
-    list.innerHTML = filtered.length ? filtered.map(entry => {
-      const rate = entry.total ? Math.round((entry.correct / entry.total) * 100) : 0;
-      return `<article class="card stack">
-        <div class="row-wrap space-between"><strong>${escapeHtml(entry.deck)}</strong><span>${rate}%</span></div>
-        <div>${escapeHtml(GAME_MODES[entry.gameMode] || "通常")}・${entry.reverse ? "逆4択" : "入力"}</div>
-        <div class="subtle small">${formatDateTime(entry.timeMillis)}・${entry.correct}/${entry.total}・SCORE ${entry.score}・最大${entry.maxCombo || 0}コンボ・${entry.durationSec || 0}秒</div>
-      </article>`;
-    }).join("") : `<div class="card center subtle">該当する履歴はありません。</div>`;
-    drawAccuracyChart(filtered.slice(0, 20).reverse().map(entry => entry.total ? (entry.correct / entry.total) * 100 : 0));
-  };
-  ["history-deck", "history-mode", "history-reverse"].forEach(id => document.getElementById(id).addEventListener("change", update));
+  document.querySelectorAll("[data-history-view]").forEach(button => {
+    button.addEventListener("click", () => {
+      historyView = button.dataset.historyView || "ALL";
+      renderHistory();
+    });
+  });
   document.getElementById("clear-history").addEventListener("click", () => {
-    if (!confirm("履歴をすべて削除しますか？")) return;
+    if (!confirm("クイズとめくりの統計履歴をすべて削除しますか？ 通算出題回数は残します。")) return;
     localStorage.removeItem("kq.history");
+    localStorage.removeItem("kq.flashHistory");
     renderHistory();
   });
-  update();
+  if (historyView === "QUIZ") {
+    drawAccuracyChart(quizEntries.slice(0, 20).reverse().map(entry => entry.total ? entry.correct / entry.total * 100 : 0));
+  }
 }
 
 function drawAccuracyChart(rates) {
@@ -4005,6 +4189,7 @@ window.addEventListener("popstate", event => {
 });
 
 window.addEventListener("beforeunload", event => {
+  if (state.screen === "flash" && state.flash) recordFlashSession(state.flash, false);
   if (state.screen === "quiz" && state.quiz && !state.quiz.ended) {
     event.preventDefault();
     event.returnValue = "";
